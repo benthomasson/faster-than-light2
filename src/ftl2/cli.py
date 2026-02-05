@@ -523,7 +523,7 @@ def validate_execution_requirements(inventory, module_name: str, module_dirs: li
 
 @cli.command("run")
 @click.option("--module", "-m", required=True, help="Module to execute")
-@click.option("--module-dir", "-M", help="Module directory to search for modules")
+@click.option("--module-dir", "-M", multiple=True, help="Module directory to search (can specify multiple, searched before built-ins)")
 @click.option("--inventory", "-i", required=True, help="Inventory file (YAML format)")
 @click.option("--requirements", "-r", help="Python requirements file")
 @click.option("--args", "-a", help="Module arguments in key=value format")
@@ -534,7 +534,7 @@ def validate_execution_requirements(inventory, module_name: str, module_dirs: li
 @click.option("--verbose", "-v", is_flag=True, help="Show verbose logging")
 def run_module(
     module: str,
-    module_dir: Optional[str],
+    module_dir: tuple[str, ...],
     inventory: str,
     requirements: Optional[str],
     args: Optional[str],
@@ -578,16 +578,17 @@ def run_module(
             dependencies = [x for x in f.read().splitlines() if x]
 
     # Build module directories list
+    # User-specified directories are searched first (higher priority)
     module_dirs = []
 
-    # Add default built-in modules directory
+    # Add user-specified module directories first (searched before built-ins)
+    for user_dir in module_dir:
+        module_dirs.append(Path(user_dir))
+
+    # Add default built-in modules directory last (fallback)
     default_module_dir = Path(__file__).parent / "modules"
     if default_module_dir.exists():
         module_dirs.append(default_module_dir)
-
-    # Add user-specified module directory if provided
-    if module_dir:
-        module_dirs.append(Path(module_dir))
 
     async def run_async() -> tuple[ExecutionResults, float]:
         """Inner async function to handle async operations.
