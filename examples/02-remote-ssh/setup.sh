@@ -47,7 +47,7 @@ setup_ssh_key() {
     # Copy public key to container
     echo "  Copying SSH key to container..."
     docker compose exec -T remote-server mkdir -p /config/.ssh
-    docker compose exec -T remote-server sh -c "cat > /config/.ssh/authorized_keys" < "${ssh_key}.pub"
+    docker cp "${ssh_key}.pub" ftl2-example-remote:/config/.ssh/authorized_keys
     docker compose exec -T remote-server chmod 700 /config/.ssh
     docker compose exec -T remote-server chmod 600 /config/.ssh/authorized_keys
     docker compose exec -T remote-server chown -R 1000:1000 /config/.ssh

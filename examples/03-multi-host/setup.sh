@@ -49,7 +49,7 @@ setup_ssh_keys() {
     echo "  Copying SSH key to containers..."
     for container in "${CONTAINERS[@]}"; do
         docker exec "$container" mkdir -p /config/.ssh 2>/dev/null
-        cat "${ssh_key}.pub" | docker exec -i "$container" tee /config/.ssh/authorized_keys > /dev/null
+        docker cp "${ssh_key}.pub" "$container:/config/.ssh/authorized_keys"
         docker exec "$container" chmod 700 /config/.ssh
         docker exec "$container" chmod 600 /config/.ssh/authorized_keys
         docker exec "$container" chown -R 1000:1000 /config/.ssh
