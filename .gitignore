@@ -151,3 +151,4 @@ Thumbs.db
 # uv
 .uv/
 uv.lock
+tests/ssh_test_config/

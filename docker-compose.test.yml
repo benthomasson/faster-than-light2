@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  ssh-test-server:
+    image: lscr.io/linuxserver/openssh-server:latest
+    container_name: ftl2-ssh-test
+    hostname: ssh-test-server
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/New_York
+      - PASSWORD_ACCESS=true
+      - USER_PASSWORD=testpass
+      - USER_NAME=testuser
+      - SUDO_ACCESS=true
+    ports:
+      - "2222:2222"
+    volumes:
+      # Mount test modules directory
+      - ./tests/test_modules:/test_modules:ro
+      # Mount SSH config
+      - ./tests/ssh_test_config:/config
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 2222 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s

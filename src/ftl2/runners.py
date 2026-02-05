@@ -414,6 +414,7 @@ class RemoteModuleRunner(ModuleRunner):
         ssh_host = host.ansible_host if host.ansible_host else host.name
         ssh_port = host.ansible_port if host.ansible_port else 22
         ssh_user = host.ansible_user if host.ansible_user else getuser()
+        ssh_password = host.get_var("ansible_password")  # Optional password auth
         interpreter = host.ansible_python_interpreter if host.ansible_python_interpreter else sys.executable
 
         # Find module
@@ -431,7 +432,7 @@ class RemoteModuleRunner(ModuleRunner):
 
         # Get or create gate connection
         gate = await self._get_or_create_gate(
-            host.name, ssh_host, ssh_port, ssh_user, interpreter, context
+            host.name, ssh_host, ssh_port, ssh_user, ssh_password, interpreter, context
         )
 
         try:
@@ -466,6 +467,7 @@ class RemoteModuleRunner(ModuleRunner):
         ssh_host: str,
         ssh_port: int,
         ssh_user: str,
+        ssh_password: str | None,
         interpreter: str,
         context: ExecutionContext,
     ) -> Gate:
@@ -476,6 +478,7 @@ class RemoteModuleRunner(ModuleRunner):
             ssh_host: SSH hostname/IP
             ssh_port: SSH port
             ssh_user: SSH username
+            ssh_password: SSH password (optional, for password auth)
             interpreter: Remote Python interpreter path
             context: Execution context with gate config
 
@@ -491,13 +494,14 @@ class RemoteModuleRunner(ModuleRunner):
 
         # Create new gate connection
         logger.info(f"Creating new gate for {host_name}")
-        return await self._connect_gate(ssh_host, ssh_port, ssh_user, interpreter, context)
+        return await self._connect_gate(ssh_host, ssh_port, ssh_user, ssh_password, interpreter, context)
 
     async def _connect_gate(
         self,
         ssh_host: str,
         ssh_port: int,
         ssh_user: str,
+        ssh_password: str | None,
         interpreter: str,
         context: ExecutionContext,
     ) -> Gate:
@@ -507,6 +511,7 @@ class RemoteModuleRunner(ModuleRunner):
             ssh_host: SSH hostname/IP
             ssh_port: SSH port
             ssh_user: SSH username
+            ssh_password: SSH password (optional, for password auth)
             interpreter: Remote Python interpreter path
             context: Execution context with gate config
 
@@ -520,13 +525,17 @@ class RemoteModuleRunner(ModuleRunner):
         while True:
             try:
                 # Connect to SSH
-                conn = await asyncssh.connect(
-                    ssh_host,
-                    port=ssh_port,
-                    username=ssh_user,
-                    known_hosts=None,
-                    connect_timeout=3600,  # 1 hour
-                )
+                connect_kwargs = {
+                    "host": ssh_host,
+                    "port": ssh_port,
+                    "username": ssh_user,
+                    "known_hosts": None,
+                    "connect_timeout": 3600,  # 1 hour
+                }
+                if ssh_password:
+                    connect_kwargs["password"] = ssh_password
+
+                conn = await asyncssh.connect(**connect_kwargs)
 
                 # Verify Python version
                 await self._check_version(conn, interpreter)
@@ -536,7 +545,7 @@ class RemoteModuleRunner(ModuleRunner):
                 gate_file = await self._send_gate(conn, temp_dir, interpreter, context)
 
                 # Start gate process
-                gate_process = await self._open_gate(conn, gate_file)
+                gate_process = await self._open_gate(conn, gate_file, interpreter)
 
                 return Gate(conn, gate_process, temp_dir)
 
@@ -619,12 +628,13 @@ class RemoteModuleRunner(ModuleRunner):
 
         return gate_file_name
 
-    async def _open_gate(self, conn: SSHClientConnection, gate_file: str) -> "SSHClientProcess[Any]":
+    async def _open_gate(self, conn: SSHClientConnection, gate_file: str, interpreter: str) -> "SSHClientProcess[Any]":
         """Start gate process and perform handshake.
 
         Args:
             conn: Active SSH connection
             gate_file: Path to gate executable on remote host
+            interpreter: Python interpreter path to use
 
         Returns:
             Running gate process
@@ -632,7 +642,9 @@ class RemoteModuleRunner(ModuleRunner):
         Raises:
             Exception: If gate fails to start or handshake fails
         """
-        process = await conn.create_process(gate_file)
+        # Create process with binary I/O, explicitly invoking Python
+        # This ensures the gate runs even if shebang isn't executed properly
+        process = await conn.create_process(f"{interpreter} {gate_file}", encoding=None)
 
         # Send Hello and wait for response
         await self.protocol.send_message(process.stdin, "Hello", {})  # type: ignore[arg-type]

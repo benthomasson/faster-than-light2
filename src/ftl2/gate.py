@@ -189,11 +189,19 @@ class GateBuilder:
             module_dir = gate_dir / "ftl_gate"
             module_dir.mkdir()
 
+            # Create ftl2 package directory for message protocol
+            ftl2_dir = gate_dir / "ftl2"
+            ftl2_dir.mkdir()
+
             # Create __main__.py entry point
             self._create_main_entry(gate_dir)
 
-            # Create package __init__.py
+            # Create package __init__.py files
             (module_dir / "__init__.py").write_text("")
+            (ftl2_dir / "__init__.py").write_text("")
+
+            # Copy message protocol module
+            self._copy_message_module(ftl2_dir)
 
             # Install modules
             if config.modules:
@@ -263,6 +271,32 @@ class GateBuilder:
             target_path.write_bytes(module_content)
 
             logger.debug(f"Installed module {module} to {target_path}")
+
+    def _copy_message_module(self, ftl2_dir: Path) -> None:
+        """Copy message protocol module into gate.
+
+        Args:
+            ftl2_dir: ftl2 package directory in gate
+
+        Raises:
+            GateError: If copy fails
+        """
+        try:
+            # Get path to message.py in the installed package
+            import ftl2
+
+            ftl2_package_dir = Path(ftl2.__file__).parent
+            message_path = ftl2_package_dir / "message.py"
+
+            if not message_path.exists():
+                raise GateError(f"message.py not found at {message_path}")
+
+            # Copy message.py to gate
+            shutil.copy(message_path, ftl2_dir / "message.py")
+            logger.debug(f"Copied message module to {ftl2_dir}")
+
+        except Exception as e:
+            raise GateError(f"Failed to copy message module: {e}") from e
 
     def _install_dependencies(self, config: GateBuildConfig, gate_dir: Path, tempdir: Path) -> None:
         """Install Python dependencies into gate using pip.
