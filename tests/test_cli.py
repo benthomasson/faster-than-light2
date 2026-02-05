@@ -79,6 +79,104 @@ def test_parse_module_args_quoted_values():
     assert result == {"cmd": "echo hello world", "path": "/tmp/file"}
 
 
+class TestOutputFormatters:
+    """Tests for output formatting functions."""
+
+    def test_format_results_json(self):
+        """Test JSON output formatting."""
+        import json
+        from ftl2.cli import format_results_json
+        from ftl2.executor import ExecutionResults
+        from ftl2.types import ModuleResult
+
+        results = ExecutionResults(
+            results={
+                "web01": ModuleResult(
+                    host_name="web01",
+                    success=True,
+                    changed=False,
+                    output={"ping": "pong"},
+                ),
+                "web02": ModuleResult(
+                    host_name="web02",
+                    success=False,
+                    changed=False,
+                    output={},
+                    error="Connection timeout",
+                ),
+            }
+        )
+
+        output = format_results_json(results, "ping", 1.234)
+        parsed = json.loads(output)
+
+        assert parsed["module"] == "ping"
+        assert parsed["total_hosts"] == 2
+        assert parsed["successful"] == 1
+        assert parsed["failed"] == 1
+        assert parsed["duration"] == 1.234
+        assert "timestamp" in parsed
+        assert parsed["results"]["web01"]["success"] is True
+        assert parsed["results"]["web01"]["output"]["ping"] == "pong"
+        assert parsed["results"]["web02"]["success"] is False
+        assert parsed["results"]["web02"]["error"] == "Connection timeout"
+
+    def test_format_results_text(self):
+        """Test text output formatting."""
+        from ftl2.cli import format_results_text
+        from ftl2.executor import ExecutionResults
+        from ftl2.types import ModuleResult
+
+        results = ExecutionResults(
+            results={
+                "web01": ModuleResult(
+                    host_name="web01",
+                    success=True,
+                    changed=False,
+                    output={"ping": "pong"},
+                ),
+            }
+        )
+
+        output = format_results_text(results, verbose=False)
+
+        assert "Execution Results:" in output
+        assert "Total hosts: 1" in output
+        assert "Successful: 1" in output
+        assert "Failed: 0" in output
+
+    def test_format_results_text_verbose(self):
+        """Test verbose text output formatting."""
+        from ftl2.cli import format_results_text
+        from ftl2.executor import ExecutionResults
+        from ftl2.types import ModuleResult
+
+        results = ExecutionResults(
+            results={
+                "web01": ModuleResult(
+                    host_name="web01",
+                    success=True,
+                    changed=True,
+                    output={"ping": "pong"},
+                ),
+                "web02": ModuleResult(
+                    host_name="web02",
+                    success=False,
+                    changed=False,
+                    output={},
+                    error="Connection failed",
+                ),
+            }
+        )
+
+        output = format_results_text(results, verbose=True)
+
+        assert "Detailed Results:" in output
+        assert "web01: OK (changed)" in output
+        assert "web02: FAILED" in output
+        assert "Error: Connection failed" in output
+
+
 class TestValidateExecutionRequirements:
     """Tests for validate_execution_requirements function."""
 

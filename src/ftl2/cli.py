@@ -1,22 +1,102 @@
 """Command-line interface for FTL2."""
 
 import asyncio
+import json
 import logging
 import shlex
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from pprint import pprint
-from typing import Optional
+from typing import Any, Optional
 
 import click
 
 from ftl2 import __version__
-from ftl2.executor import ModuleExecutor
+from ftl2.executor import ModuleExecutor, ExecutionResults
 from ftl2.inventory import load_inventory, Inventory
 from ftl2.logging import configure_logging, get_logger
 from ftl2.runners import ExecutionContext
-from ftl2.types import ExecutionConfig, GateConfig
+from ftl2.types import ExecutionConfig, GateConfig, ModuleResult
 
 logger = get_logger("ftl2.cli")
+
+
+def format_results_json(
+    results: ExecutionResults,
+    module: str,
+    duration: float,
+) -> str:
+    """Format execution results as JSON.
+
+    Args:
+        results: Execution results from module run
+        module: Name of module that was executed
+        duration: Execution duration in seconds
+
+    Returns:
+        JSON string with structured results
+    """
+    # Convert ModuleResult objects to dictionaries
+    host_results: dict[str, Any] = {}
+    for host_name, result in results.results.items():
+        host_results[host_name] = {
+            "success": result.success,
+            "changed": result.changed,
+            "output": result.output,
+        }
+        if result.error:
+            host_results[host_name]["error"] = result.error
+
+    output = {
+        "module": module,
+        "total_hosts": results.total_hosts,
+        "successful": results.successful,
+        "failed": results.failed,
+        "results": host_results,
+        "duration": round(duration, 3),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+    return json.dumps(output, indent=2)
+
+
+def format_results_text(
+    results: ExecutionResults,
+    verbose: bool = False,
+) -> str:
+    """Format execution results as human-readable text.
+
+    Args:
+        results: Execution results from module run
+        verbose: Whether to include detailed per-host results
+
+    Returns:
+        Formatted text string
+    """
+    lines = [
+        "",
+        "Execution Results:",
+        f"Total hosts: {results.total_hosts}",
+        f"Successful: {results.successful}",
+        f"Failed: {results.failed}",
+        "",
+    ]
+
+    if verbose and results.results:
+        lines.append("Detailed Results:")
+        for host_name, result in results.results.items():
+            status = "OK" if result.success else "FAILED"
+            changed = " (changed)" if result.changed else ""
+            lines.append(f"  {host_name}: {status}{changed}")
+            if result.error:
+                lines.append(f"    Error: {result.error}")
+            if result.output and verbose:
+                for key, value in result.output.items():
+                    lines.append(f"    {key}: {value}")
+        lines.append("")
+
+    return "\n".join(lines)
 
 
 # Main CLI group
@@ -359,6 +439,8 @@ def validate_execution_requirements(inventory, module_name: str, module_dirs: li
 @click.option("--inventory", "-i", required=True, help="Inventory file (YAML format)")
 @click.option("--requirements", "-r", help="Python requirements file")
 @click.option("--args", "-a", help="Module arguments in key=value format")
+@click.option("--format", "-f", "output_format", type=click.Choice(["text", "json"]),
+              default="text", help="Output format (default: text)")
 @click.option("--debug", is_flag=True, help="Show debug logging")
 @click.option("--verbose", "-v", is_flag=True, help="Show verbose logging")
 def run_module(
@@ -367,6 +449,7 @@ def run_module(
     inventory: str,
     requirements: Optional[str],
     args: Optional[str],
+    output_format: str,
     debug: bool,
     verbose: bool,
 ) -> None:
@@ -379,12 +462,17 @@ def run_module(
     Examples:
         ftl2 run -m ping -i hosts.yml
 
+        ftl2 run -m ping -i hosts.yml --format json
+
         ftl2 run -m file -i inventory.yml -a "path=/tmp/test state=touch"
 
         ftl2 run -m shell -i hosts.yml -a "cmd='uptime'" --verbose
     """
     # Configure logging
-    if debug:
+    # For JSON output, suppress logging to avoid polluting the output
+    if output_format == "json":
+        configure_logging(level=logging.CRITICAL)  # Only critical errors
+    elif debug:
         configure_logging(level=logging.DEBUG, debug=True)
     elif verbose:
         configure_logging(level=logging.INFO)
@@ -409,8 +497,14 @@ def run_module(
     if module_dir:
         module_dirs.append(Path(module_dir))
 
-    async def run_async() -> None:
-        """Inner async function to handle async operations."""
+    async def run_async() -> tuple[ExecutionResults, float]:
+        """Inner async function to handle async operations.
+
+        Returns:
+            Tuple of (results, duration_seconds)
+        """
+        start_time = time.time()
+
         # Add module context to logger
         logger.add_context(module=module)
 
@@ -449,24 +543,12 @@ def run_module(
                 with logger.scope("Module execution"):
                     results = await executor.run(inv, context)
 
-                # Display results
-                click.echo(f"\nExecution Results:")
-                click.echo(f"Total hosts: {results.total_hosts}")
-                click.echo(f"Successful: {results.successful}")
-                click.echo(f"Failed: {results.failed}")
-                click.echo()
-
-                if verbose or debug:
-                    click.echo("Detailed Results:")
-                    pprint(results.results)
-
                 logger.info("Execution complete",
                            successful=results.successful,
                            failed=results.failed)
 
-                # Exit with error if any host failed
-                if not results.is_success():
-                    raise click.ClickException(f"{results.failed} host(s) failed execution")
+                duration = time.time() - start_time
+                return results, duration
 
             finally:
                 # Clean up resources
@@ -474,7 +556,22 @@ def run_module(
                 await executor.cleanup()
 
     # Run the async operations
-    asyncio.run(run_async())
+    results, duration = asyncio.run(run_async())
+
+    # Display results based on format
+    if output_format == "json":
+        click.echo(format_results_json(results, module, duration))
+    else:
+        click.echo(format_results_text(results, verbose=verbose or debug))
+
+    # Exit with error if any host failed
+    if not results.is_success():
+        # For JSON format, the error info is already in the output
+        # Use exit code to indicate failure without extra message
+        if output_format == "json":
+            raise SystemExit(1)
+        else:
+            raise click.ClickException(f"{results.failed} host(s) failed execution")
 
 
 def main() -> None:
