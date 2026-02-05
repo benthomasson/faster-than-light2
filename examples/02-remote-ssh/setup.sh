@@ -34,6 +34,27 @@ check_docker() {
     fi
 }
 
+# Set up SSH key authentication
+setup_ssh_key() {
+    local ssh_key="$HOME/.ssh/ftl2_example_rsa"
+
+    # Generate SSH key if it doesn't exist
+    if [ ! -f "$ssh_key" ]; then
+        echo "  Generating SSH key..."
+        ssh-keygen -t rsa -b 4096 -f "$ssh_key" -N "" -C "ftl2-example" > /dev/null 2>&1
+    fi
+
+    # Copy public key to container
+    echo "  Copying SSH key to container..."
+    docker compose exec -T remote-server mkdir -p /config/.ssh
+    docker compose exec -T remote-server sh -c "cat > /config/.ssh/authorized_keys" < "${ssh_key}.pub"
+    docker compose exec -T remote-server chmod 700 /config/.ssh
+    docker compose exec -T remote-server chmod 600 /config/.ssh/authorized_keys
+    docker compose exec -T remote-server chown -R 1000:1000 /config/.ssh
+
+    echo -e "${GREEN}  SSH key configured: $ssh_key${NC}"
+}
+
 # Start the SSH server container
 start_container() {
     echo -e "${GREEN}Starting SSH server container...${NC}"
@@ -51,6 +72,10 @@ start_container() {
             docker compose exec -T remote-server apk add python3 > /dev/null 2>&1
             echo -e "${GREEN}Python installed${NC}"
 
+            # Set up SSH key authentication
+            echo -e "${YELLOW}Setting up SSH key authentication...${NC}"
+            setup_ssh_key
+
             echo
             show_info
             return 0
@@ -64,6 +89,10 @@ start_container() {
     echo -e "${YELLOW}Installing Python in container...${NC}"
     docker compose exec -T remote-server apk add python3 > /dev/null 2>&1
     echo -e "${GREEN}Python installed${NC}"
+
+    # Set up SSH key authentication
+    echo -e "${YELLOW}Setting up SSH key authentication...${NC}"
+    setup_ssh_key
 
     show_info
 }
@@ -92,10 +121,10 @@ show_info() {
     echo "  Host: 127.0.0.1"
     echo "  Port: 2222"
     echo "  User: testuser"
-    echo "  Pass: testpass"
+    echo "  Auth: SSH key (~/.ssh/ftl2_example_rsa)"
     echo
     echo -e "${GREEN}Test SSH Connection:${NC}"
-    echo "  ssh -p 2222 testuser@localhost"
+    echo "  ssh -p 2222 -i ~/.ssh/ftl2_example_rsa testuser@localhost"
     echo
     echo -e "${GREEN}Run FTL2 Examples:${NC}"
     echo "  ./run_examples.sh"

@@ -18,27 +18,27 @@ all:
       # Python interpreter on remote host
       ansible_python_interpreter: /usr/bin/python3
 
-      # Variables (including password for authentication)
-      vars:
-        # Password authentication (not recommended for production)
-        # In production, use SSH keys instead
-        ansible_password: testpass
-
-        # Optional: Custom variables for testing
-        environment: development
-        example_var: "Remote execution test"
+      # Host variables
+      # Note: Variables with ansible_ prefix are connection params
+      # Variables without prefix go into vars dict
+      ssh_private_key_file: ~/.ssh/ftl2_example_rsa
+      environment: development
+      example_var: "Remote execution test"
 
 # Notes:
 #
-# Password Authentication:
-#   The ansible_password is stored in vars for this example.
-#   For production, remove this and use SSH key authentication.
-#
 # SSH Key Authentication:
-#   1. Generate SSH key: ssh-keygen -t rsa -b 4096
-#   2. Copy to remote: ssh-copy-id -p 2222 testuser@localhost
-#   3. Remove ansible_password from inventory
-#   4. FTL2 will use your default SSH key automatically
+#   This example uses SSH key authentication (recommended for production).
+#   The setup.sh script automatically:
+#   1. Generates SSH key: ~/.ssh/ftl2_example_rsa
+#   2. Copies public key to the container
+#   3. Configures proper permissions
+#
+# Password Authentication (Alternative):
+#   To use password authentication instead, add:
+#     ansible_password: testpass
+#   (goes into vars automatically since it starts with ansible_)
+#   And remove the ssh_private_key_file line
 #
 # SSH Options:
 #   FTL2 automatically sets:

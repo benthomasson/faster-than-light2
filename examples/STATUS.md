@@ -21,33 +21,30 @@ Created 5 basic modules in `src/ftl2/modules/`:
 - Fixed argument parsing to handle quoted strings (`cmd='echo hello'`)
 - Uses `shlex` for proper shell-style argument parsing
 
-### Example 02: Remote SSH 🚧
-- **Status**: PARTIALLY WORKING
-- **Files**: All created
-- **Issue**: SSH password authentication failing with asyncssh
-- **Workaround**: SSH integration tests pass, so the core functionality works
-- **TODO**: Debug asyncssh connection issues with example containers
+### Example 02: Remote SSH ✅
+- **Status**: WORKING
+- **Files**: All created and tested
+- **Authentication**: SSH key-based (automatic setup via setup.sh)
+- **Test**: Remote execution working with ping, shell, setup, file, copy modules
+- **Fixed**: Switched from password auth to SSH key auth
 
 ### Example 03: Multi-Host 📝
 - **Status**: Created but untested
 - **Files**: All created
 - **Depends**: On resolving Example 02 issues
 
-## Known Issues
+## Resolved Issues
 
-### SSH Authentication
-The remote examples are experiencing "Permission denied" errors when connecting via asyncssh password authentication. The same configuration works in the SSH integration tests (`docker-compose.test.yml`), suggesting a timing or configuration issue with the example containers.
+### SSH Authentication ✅ FIXED
+Initially experienced "Permission denied" errors with password authentication.
 
-**Error**:
-```
-asyncssh.misc.PermissionDenied: Permission denied for user testuser on host 127.0.0.1
-```
+**Solution**: Switched to SSH key authentication
+- `setup.sh` automatically generates SSH key (~/.ssh/ftl2_example_rsa)
+- Public key copied to container with proper permissions
+- More secure and production-like approach
+- Variables without `ansible_` prefix go into `vars` dict in inventory
 
-**Investigation needed**:
-- Compare working test container vs failing example container
-- Check if asyncssh needs additional authentication parameters
-- Consider using SSH keys instead of password auth
-- Verify container initialization timing
+**Key Learning**: In FTL2 inventory, use `ssh_private_key_file` (not `ansible_ssh_private_key_file`) since only fields starting with `ansible_` are direct host attributes
 
 ## Testing
 

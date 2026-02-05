@@ -415,6 +415,7 @@ class RemoteModuleRunner(ModuleRunner):
         ssh_port = host.ansible_port if host.ansible_port else 22
         ssh_user = host.ansible_user if host.ansible_user else getuser()
         ssh_password = host.get_var("ansible_password")  # Optional password auth
+        ssh_key_file = host.get_var("ssh_private_key_file")  # Optional SSH key (without ansible_ prefix)
         interpreter = host.ansible_python_interpreter if host.ansible_python_interpreter else sys.executable
 
         # Find module
@@ -432,7 +433,7 @@ class RemoteModuleRunner(ModuleRunner):
 
         # Get or create gate connection
         gate = await self._get_or_create_gate(
-            host.name, ssh_host, ssh_port, ssh_user, ssh_password, interpreter, context
+            host.name, ssh_host, ssh_port, ssh_user, ssh_password, ssh_key_file, interpreter, context
         )
 
         try:
@@ -468,6 +469,7 @@ class RemoteModuleRunner(ModuleRunner):
         ssh_port: int,
         ssh_user: str,
         ssh_password: str | None,
+        ssh_key_file: str | None,
         interpreter: str,
         context: ExecutionContext,
     ) -> Gate:
@@ -479,6 +481,7 @@ class RemoteModuleRunner(ModuleRunner):
             ssh_port: SSH port
             ssh_user: SSH username
             ssh_password: SSH password (optional, for password auth)
+            ssh_key_file: SSH private key file path (optional, for key auth)
             interpreter: Remote Python interpreter path
             context: Execution context with gate config
 
@@ -494,7 +497,7 @@ class RemoteModuleRunner(ModuleRunner):
 
         # Create new gate connection
         logger.info(f"Creating new gate for {host_name}")
-        return await self._connect_gate(ssh_host, ssh_port, ssh_user, ssh_password, interpreter, context)
+        return await self._connect_gate(ssh_host, ssh_port, ssh_user, ssh_password, ssh_key_file, interpreter, context)
 
     async def _connect_gate(
         self,
@@ -502,6 +505,7 @@ class RemoteModuleRunner(ModuleRunner):
         ssh_port: int,
         ssh_user: str,
         ssh_password: str | None,
+        ssh_key_file: str | None,
         interpreter: str,
         context: ExecutionContext,
     ) -> Gate:
@@ -512,6 +516,7 @@ class RemoteModuleRunner(ModuleRunner):
             ssh_port: SSH port
             ssh_user: SSH username
             ssh_password: SSH password (optional, for password auth)
+            ssh_key_file: SSH private key file path (optional, for key auth)
             interpreter: Remote Python interpreter path
             context: Execution context with gate config
 
@@ -532,9 +537,19 @@ class RemoteModuleRunner(ModuleRunner):
                     "known_hosts": None,
                     "connect_timeout": 3600,  # 1 hour
                 }
+                # Add authentication method
                 if ssh_password:
                     connect_kwargs["password"] = ssh_password
+                elif ssh_key_file:
+                    # Expand ~ in path
+                    import os
+                    expanded_key = os.path.expanduser(ssh_key_file)
+                    logger.debug(f"Using SSH key file: {expanded_key}")
+                    connect_kwargs["client_keys"] = [expanded_key]
+                else:
+                    logger.debug("No password or key file provided, using default SSH keys")
 
+                logger.debug(f"SSH connect_kwargs: {connect_kwargs}")
                 conn = await asyncssh.connect(**connect_kwargs)
 
                 # Verify Python version
