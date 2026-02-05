@@ -5,14 +5,24 @@ pluggable runners for local and remote execution with a common interface.
 """
 
 import asyncio
+import base64
 import json
 import logging
+import sys
 import tempfile
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from getpass import getuser
 from pathlib import Path
 from typing import Any
 
+import asyncssh
+from asyncssh.connection import SSHClientConnection
+from asyncssh.process import SSHClientProcess
+
+from .exceptions import ModuleExecutionError
+from .gate import GateBuildConfig, GateBuilder
+from .message import GateProtocol
 from .types import ExecutionConfig, GateConfig, HostConfig, ModuleResult
 from .utils import find_module, module_wants_json
 
@@ -57,6 +67,29 @@ class ExecutionContext:
     def module_args(self) -> dict[str, Any]:
         """Get module arguments from execution config."""
         return self.execution_config.module_args
+
+
+@dataclass
+class Gate:
+    """Container for an active SSH gate connection.
+
+    Holds all components needed for remote module execution through a gate:
+    the SSH connection, the gate process, and the temporary directory.
+
+    Attributes:
+        conn: Active SSH connection to the remote host
+        gate_process: Running gate process for module execution
+        temp_dir: Temporary directory path on remote host
+
+    Example:
+        >>> gate = Gate(conn, process, "/tmp")
+        >>> # Use gate for module execution
+        >>> await close_gate(gate)
+    """
+
+    conn: SSHClientConnection
+    gate_process: "SSHClientProcess[Any]"
+    temp_dir: str
 
 
 class ModuleRunner(ABC):
@@ -323,6 +356,8 @@ class RemoteModuleRunner(ModuleRunner):
 
     Attributes:
         gate_cache: Cache of active gate connections by host
+        gate_builder: Builder for creating gate executables
+        protocol: Message protocol for gate communication
 
     Example:
         >>> runner = RemoteModuleRunner()
@@ -339,7 +374,9 @@ class RemoteModuleRunner(ModuleRunner):
 
     def __init__(self) -> None:
         """Initialize the remote runner with empty gate cache."""
-        self.gate_cache: dict[str, Any] = {}
+        self.gate_cache: dict[str, Gate] = {}
+        self.gate_builder: GateBuilder | None = None
+        self.protocol = GateProtocol()
 
     async def run(
         self,
@@ -356,17 +393,360 @@ class RemoteModuleRunner(ModuleRunner):
             ModuleResult with execution outcome
 
         Raises:
-            NotImplementedError: Implementation pending
+            ModuleExecutionError: If module execution fails
         """
-        # TODO: Implement remote module execution via gates
-        # This will be implemented after local runner
-        raise NotImplementedError("Remote module execution not yet implemented")
+        # Extract connection parameters from host config
+        ssh_host = host.ansible_host if host.ansible_host else host.name
+        ssh_port = host.ansible_port if host.ansible_port else 22
+        ssh_user = host.ansible_user if host.ansible_user else getuser()
+        interpreter = host.ansible_python_interpreter if host.ansible_python_interpreter else sys.executable
+
+        # Find module
+        module_dirs = context.execution_config.module_dirs
+        module_path = find_module(module_dirs, context.module_name)
+        if module_path is None:
+            raise ModuleExecutionError(f"Module {context.module_name} not found in {module_dirs}")
+
+        # Initialize gate builder if needed
+        if self.gate_builder is None:
+            cache_dir = context.gate_config.cache_dir
+            if cache_dir is None:
+                cache_dir = Path.home() / ".ftl2" / "gates"
+            self.gate_builder = GateBuilder(cache_dir)
+
+        # Get or create gate connection
+        gate = await self._get_or_create_gate(
+            host.name, ssh_host, ssh_port, ssh_user, interpreter, context
+        )
+
+        try:
+            # Execute module through gate
+            result_data = await self._execute_through_gate(
+                gate, module_path, context.module_name, context.module_args
+            )
+
+            # Cache the gate for reuse
+            self.gate_cache[host.name] = gate
+
+            # Convert to ModuleResult
+            success = result_data.get("rc", 0) == 0
+            return ModuleResult(
+                host_name=host.name,
+                success=success,
+                changed=result_data.get("changed", False),
+                output=result_data,
+                error=result_data.get("stderr") if not success else None,
+            )
+
+        except Exception as e:
+            # Clean up gate on error
+            await self._close_gate(gate)
+            if host.name in self.gate_cache:
+                del self.gate_cache[host.name]
+            raise ModuleExecutionError(f"Remote execution failed on {host.name}: {e}") from e
+
+    async def _get_or_create_gate(
+        self,
+        host_name: str,
+        ssh_host: str,
+        ssh_port: int,
+        ssh_user: str,
+        interpreter: str,
+        context: ExecutionContext,
+    ) -> Gate:
+        """Get cached gate or create new one.
+
+        Args:
+            host_name: Host identifier for caching
+            ssh_host: SSH hostname/IP
+            ssh_port: SSH port
+            ssh_user: SSH username
+            interpreter: Remote Python interpreter path
+            context: Execution context with gate config
+
+        Returns:
+            Active Gate connection
+        """
+        # Check cache first
+        if host_name in self.gate_cache:
+            logger.debug(f"Reusing cached gate for {host_name}")
+            gate = self.gate_cache[host_name]
+            del self.gate_cache[host_name]  # Remove from cache to use
+            return gate
+
+        # Create new gate connection
+        logger.info(f"Creating new gate for {host_name}")
+        return await self._connect_gate(ssh_host, ssh_port, ssh_user, interpreter, context)
+
+    async def _connect_gate(
+        self,
+        ssh_host: str,
+        ssh_port: int,
+        ssh_user: str,
+        interpreter: str,
+        context: ExecutionContext,
+    ) -> Gate:
+        """Establish SSH connection and create gate.
+
+        Args:
+            ssh_host: SSH hostname/IP
+            ssh_port: SSH port
+            ssh_user: SSH username
+            interpreter: Remote Python interpreter path
+            context: Execution context with gate config
+
+        Returns:
+            Active Gate connection
+
+        Raises:
+            Exception: On connection or gate creation failure
+        """
+        # Retry loop for connection issues
+        while True:
+            try:
+                # Connect to SSH
+                conn = await asyncssh.connect(
+                    ssh_host,
+                    port=ssh_port,
+                    username=ssh_user,
+                    known_hosts=None,
+                    connect_timeout=3600,  # 1 hour
+                )
+
+                # Verify Python version
+                await self._check_version(conn, interpreter)
+
+                # Deploy gate executable
+                temp_dir = "/tmp"
+                gate_file = await self._send_gate(conn, temp_dir, interpreter, context)
+
+                # Start gate process
+                gate_process = await self._open_gate(conn, gate_file)
+
+                return Gate(conn, gate_process, temp_dir)
+
+            except (
+                ConnectionRefusedError,
+                ConnectionResetError,
+                asyncssh.misc.ConnectionLost,
+                TimeoutError,
+            ) as e:
+                logger.warning(f"Connection failed, retrying: {type(e).__name__}")
+                continue
+
+    async def _check_version(self, conn: SSHClientConnection, interpreter: str) -> None:
+        """Verify remote Python version meets requirements.
+
+        Args:
+            conn: Active SSH connection
+            interpreter: Python interpreter path to check
+
+        Raises:
+            Exception: If Python version < 3 or unexpected output
+        """
+        result = await conn.run(f"{interpreter} --version")
+        if result.stdout:
+            output = str(result.stdout).strip()
+            for line in output.split("\n"):
+                line = line.strip()
+                if line.startswith("Python "):
+                    _, _, version = line.partition(" ")
+                    major, _, _ = version.split(".")
+                    if int(major) < 3:
+                        raise Exception("Python 3 or greater required for interpreter")
+                else:
+                    raise Exception(f"Unexpected shell output: {line}")
+
+    async def _send_gate(
+        self,
+        conn: SSHClientConnection,
+        temp_dir: str,
+        interpreter: str,
+        context: ExecutionContext,
+    ) -> str:
+        """Deploy gate executable to remote host.
+
+        Args:
+            conn: Active SSH connection
+            temp_dir: Remote temporary directory
+            interpreter: Python interpreter path
+            context: Execution context with gate config
+
+        Returns:
+            Full path to deployed gate file
+        """
+        # Build gate executable
+        assert self.gate_builder is not None
+        gate_config = GateBuildConfig(
+            modules=context.execution_config.modules,
+            module_dirs=context.execution_config.module_dirs,
+            dependencies=context.execution_config.dependencies,
+            interpreter=interpreter,
+        )
+        gate_path, gate_hash = self.gate_builder.build(gate_config)
+        gate_file_name = f"{temp_dir}/ftl_gate_{gate_hash}.pyz"
+
+        # Transfer if needed
+        async with conn.start_sftp_client() as sftp:
+            if not await sftp.exists(gate_file_name):
+                logger.info(f"Sending gate to {gate_file_name}")
+                await sftp.put(gate_path, gate_file_name)
+                await conn.run(f"chmod 700 {gate_file_name}", check=True)
+            else:
+                # Check if file is complete (non-zero size)
+                stats = await sftp.lstat(gate_file_name)
+                if stats.size == 0:
+                    logger.info(f"Resending incomplete gate {gate_file_name}")
+                    await sftp.put(gate_path, gate_file_name)
+                    await conn.run(f"chmod 700 {gate_file_name}", check=True)
+                else:
+                    logger.info(f"Reusing existing gate {gate_file_name}")
+
+        return gate_file_name
+
+    async def _open_gate(self, conn: SSHClientConnection, gate_file: str) -> "SSHClientProcess[Any]":
+        """Start gate process and perform handshake.
+
+        Args:
+            conn: Active SSH connection
+            gate_file: Path to gate executable on remote host
+
+        Returns:
+            Running gate process
+
+        Raises:
+            Exception: If gate fails to start or handshake fails
+        """
+        process = await conn.create_process(gate_file)
+
+        # Send Hello and wait for response
+        await self.protocol.send_message(process.stdin, "Hello", {})  # type: ignore[arg-type]
+        response = await self.protocol.read_message(process.stdout)  # type: ignore[arg-type]
+
+        if response is None or response[0] != "Hello":
+            error = await process.stderr.read()
+            logger.error(f"Gate handshake failed: {error}")
+            raise Exception(f"Gate handshake failed: {error}")
+
+        return process
+
+    async def _execute_through_gate(
+        self,
+        gate: Gate,
+        module_path: Path,
+        module_name: str,
+        module_args: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Execute module through gate connection.
+
+        Args:
+            gate: Active gate connection
+            module_path: Path to module file
+            module_name: Module name
+            module_args: Module arguments
+
+        Returns:
+            Module execution result dictionary
+        """
+        # Try without uploading module first
+        try:
+            await self.protocol.send_message(
+                gate.gate_process.stdin,  # type: ignore[arg-type]
+                "Module",
+                {
+                    "module_name": module_name,
+                    "module_args": module_args,
+                },
+            )
+            response = await self.protocol.read_message(gate.gate_process.stdout)  # type: ignore[arg-type]
+
+            if response is None:
+                raise ModuleExecutionError("No response from gate")
+
+            msg_type, data = response
+
+            if msg_type == "ModuleResult":
+                return dict(data)  # Ensure it's a dict
+            elif msg_type == "ModuleNotFound":
+                # Module not in gate, upload and retry
+                return await self._execute_with_upload(gate, module_path, module_name, module_args)
+            elif msg_type == "Error":
+                raise ModuleExecutionError(f"Gate error: {data.get('message', 'Unknown error')}")
+            else:
+                raise ModuleExecutionError(f"Unexpected response type: {msg_type}")
+
+        except Exception as e:
+            logger.exception(f"Module execution failed: {e}")
+            raise
+
+    async def _execute_with_upload(
+        self,
+        gate: Gate,
+        module_path: Path,
+        module_name: str,
+        module_args: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Execute module after uploading to gate.
+
+        Args:
+            gate: Active gate connection
+            module_path: Path to module file
+            module_name: Module name
+            module_args: Module arguments
+
+        Returns:
+            Module execution result dictionary
+        """
+        # Read and encode module
+        with open(module_path, "rb") as f:
+            module_content = f.read()
+        module_b64 = base64.b64encode(module_content).decode()
+
+        # Send with module content
+        await self.protocol.send_message(
+            gate.gate_process.stdin,  # type: ignore[arg-type]
+            "Module",
+            {
+                "module": module_b64,
+                "module_name": module_name,
+                "module_args": module_args,
+            },
+        )
+
+        response = await self.protocol.read_message(gate.gate_process.stdout)  # type: ignore[arg-type]
+
+        if response is None:
+            raise ModuleExecutionError("No response from gate after upload")
+
+        msg_type, data = response
+
+        if msg_type == "ModuleResult":
+            return dict(data)  # Ensure it's a dict
+        elif msg_type == "Error":
+            raise ModuleExecutionError(f"Gate error: {data.get('message', 'Unknown error')}")
+        else:
+            raise ModuleExecutionError(f"Unexpected response type: {msg_type}")
+
+    async def _close_gate(self, gate: Gate) -> None:
+        """Close gate connection and clean up resources.
+
+        Args:
+            gate: Gate connection to close
+        """
+        try:
+            # Send shutdown message
+            await self.protocol.send_message(gate.gate_process.stdin, "Shutdown", {})  # type: ignore[arg-type]
+            # Read any remaining stderr
+            if gate.gate_process.exit_status is not None:
+                await gate.gate_process.stderr.read()
+        except Exception:
+            pass  # Ignore errors during shutdown
+        finally:
+            gate.conn.close()
 
     async def cleanup(self) -> None:
-        """Clean up gate connections and resources.
-
-        Closes all cached gate connections and clears the cache.
-        """
-        # TODO: Implement gate cleanup
-        # Close all gates in gate_cache
+        """Close all cached gate connections."""
+        for host_name, gate in list(self.gate_cache.items()):
+            logger.debug(f"Closing cached gate for {host_name}")
+            await self._close_gate(gate)
         self.gate_cache.clear()
