@@ -157,11 +157,7 @@ def load_inventory(inventory_file: str | Path) -> Inventory:
                     ansible_python_interpreter=host_data.get(
                         "ansible_python_interpreter", "python3"
                     ),
-                    vars={
-                        k: v
-                        for k, v in host_data.items()
-                        if not k.startswith("ansible_")
-                    },
+                    vars={k: v for k, v in host_data.items() if not k.startswith("ansible_")},
                 )
 
                 group.add_host(host)

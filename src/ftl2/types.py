@@ -123,9 +123,7 @@ class ExecutionConfig:
             self.modules.append(self.module_name)
 
         # Convert string paths to Path objects
-        self.module_dirs = [
-            Path(d) if isinstance(d, str) else d for d in self.module_dirs
-        ]
+        self.module_dirs = [Path(d) if isinstance(d, str) else d for d in self.module_dirs]
 
 
 @dataclass
@@ -220,9 +218,7 @@ class ModuleResult:
         Returns:
             ModuleResult indicating success
         """
-        return cls(
-            host_name=host_name, success=True, changed=changed, output=output
-        )
+        return cls(host_name=host_name, success=True, changed=changed, output=output)
 
     @classmethod
     def error_result(cls, host_name: str, error: str) -> "ModuleResult":

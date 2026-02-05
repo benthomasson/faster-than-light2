@@ -196,7 +196,7 @@ class TestIsBinaryModule:
         """Test with a binary module."""
         with tempfile.TemporaryDirectory() as tmpdir:
             module_file = Path(tmpdir) / "binary"
-            module_file.write_bytes(b"\x00\x01\x02\x03\xFF")
+            module_file.write_bytes(b"\x00\x01\x02\x03\xff")
 
             result = is_binary_module(module_file)
 

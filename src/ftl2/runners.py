@@ -4,11 +4,19 @@ This module defines the strategy pattern for module execution, providing
 pluggable runners for local and remote execution with a common interface.
 """
 
+import asyncio
+import json
+import logging
+import tempfile
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from .types import ExecutionConfig, GateConfig, HostConfig, ModuleResult
+from .utils import find_module, module_wants_json
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -176,11 +184,128 @@ class LocalModuleRunner(ModuleRunner):
             ModuleResult with execution outcome
 
         Raises:
-            NotImplementedError: Implementation pending
+            ModuleExecutionError: If execution fails
         """
-        # TODO: Implement local module execution
-        # This will be implemented in the next step
-        raise NotImplementedError("Local module execution not yet implemented")
+        try:
+            # Find the module
+            module_dirs = context.execution_config.module_dirs
+            if context.module_dirs_override:
+                module_dirs = [Path(d) for d in context.module_dirs_override]
+
+            module_path = find_module(module_dirs, context.module_name)
+            if module_path is None:
+                return ModuleResult.error_result(
+                    host_name=host.name,
+                    error=f"Module {context.module_name} not found in {module_dirs}",
+                )
+
+            # Execute the module based on its type
+            # Python modules (.py extension) use JSON or new-style interface
+            # Non-Python modules are treated as binary executables
+            if module_path.suffix == ".py":
+                if module_wants_json(module_path):
+                    result_data = await self._run_json_module(module_path, context.module_args)
+                else:
+                    result_data = await self._run_new_style_module(module_path, context.module_args)
+            else:
+                # No .py extension - treat as binary executable
+                result_data = await self._run_binary_module(module_path, context.module_args)
+
+            # Parse the result
+            if isinstance(result_data, dict):
+                output = result_data
+            else:
+                try:
+                    output = json.loads(result_data)
+                except (json.JSONDecodeError, TypeError):
+                    output = {"stdout": str(result_data)}
+
+            # Determine if module made changes
+            changed = output.get("changed", False)
+
+            return ModuleResult.success_result(host_name=host.name, output=output, changed=changed)
+
+        except Exception as e:
+            logger.exception(f"Error executing module {context.module_name}")
+            return ModuleResult.error_result(
+                host_name=host.name, error=f"Execution failed: {str(e)}"
+            )
+
+    async def _run_binary_module(self, module_path: Path, module_args: dict[str, Any]) -> str:
+        """Execute a binary module with command-line arguments.
+
+        Args:
+            module_path: Path to the binary module
+            module_args: Arguments to pass as command-line args
+
+        Returns:
+            Module output as string
+        """
+        # Build command-line arguments
+        args_str = " ".join(f"{k}={v}" for k, v in module_args.items())
+        cmd = f"{module_path} {args_str}"
+
+        # Execute the module
+        proc = await asyncio.create_subprocess_shell(
+            cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        stdout, _ = await proc.communicate()
+        return stdout.decode()
+
+    async def _run_json_module(self, module_path: Path, module_args: dict[str, Any]) -> str:
+        """Execute a module that wants JSON input via file.
+
+        Args:
+            module_path: Path to the module
+            module_args: Arguments to pass as JSON file
+
+        Returns:
+            Module output as string
+        """
+        # Create temporary JSON args file
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(module_args, f)
+            args_file = f.name
+
+        try:
+            # Execute module with args file path
+            cmd = f"python3 {module_path} {args_file}"
+            proc = await asyncio.create_subprocess_shell(
+                cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            stdout, _ = await proc.communicate()
+            return stdout.decode()
+        finally:
+            # Clean up temp file
+            Path(args_file).unlink(missing_ok=True)
+
+    async def _run_new_style_module(self, module_path: Path, module_args: dict[str, Any]) -> str:
+        """Execute a new-style module with JSON stdin.
+
+        Args:
+            module_path: Path to the module
+            module_args: Arguments to pass via stdin as JSON
+
+        Returns:
+            Module output as string
+        """
+        # Prepare JSON input
+        json_input = json.dumps(module_args).encode()
+
+        # Execute module with JSON stdin
+        cmd = f"python3 {module_path}"
+        proc = await asyncio.create_subprocess_shell(
+            cmd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        stdout, _ = await proc.communicate(json_input)
+        return stdout.decode()
 
     async def cleanup(self) -> None:
         """Clean up local runner resources.

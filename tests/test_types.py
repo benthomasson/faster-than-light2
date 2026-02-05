@@ -207,9 +207,7 @@ class TestModuleResult:
 
     def test_error_result_factory(self):
         """Test creating error result with factory method."""
-        result = ModuleResult.error_result(
-            host_name="web01", error="Connection refused"
-        )
+        result = ModuleResult.error_result(host_name="web01", error="Connection refused")
 
         assert result.host_name == "web01"
         assert result.success is False
