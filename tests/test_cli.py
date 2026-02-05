@@ -763,3 +763,181 @@ class TestErrorContext:
         assert len(suggestions) > 0
         assert any("192.168.1.10" in s for s in suggestions)
         assert any("22" in s for s in suggestions)
+
+
+class TestVarsCommands:
+    """Test variable inspection commands."""
+
+    def test_vars_list_command(self):
+        """Test vars list command shows host summary."""
+        import tempfile
+        from pathlib import Path
+
+        yaml_content = """
+webservers:
+  vars:
+    http_port: 80
+  hosts:
+    web01:
+      ansible_host: 192.168.1.10
+      ansible_user: admin
+      ansible_password: secret
+"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
+            f.write(yaml_content)
+            f.flush()
+            inv_path = f.name
+
+        try:
+            runner = CliRunner()
+            result = runner.invoke(cli, ["vars", "list", "-i", inv_path])
+
+            assert result.exit_code == 0
+            assert "web01" in result.output
+            assert "variable(s)" in result.output
+            assert "webservers" in result.output
+        finally:
+            Path(inv_path).unlink()
+
+    def test_vars_list_json(self):
+        """Test vars list command with JSON output."""
+        import json
+        import tempfile
+        from pathlib import Path
+
+        yaml_content = """
+servers:
+  hosts:
+    server01:
+      ansible_host: 10.0.0.1
+      ansible_user: root
+      ansible_password: secret
+"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
+            f.write(yaml_content)
+            f.flush()
+            inv_path = f.name
+
+        try:
+            runner = CliRunner()
+            result = runner.invoke(cli, ["vars", "list", "-i", inv_path, "--format", "json"])
+
+            assert result.exit_code == 0
+            data = json.loads(result.output)
+            assert isinstance(data, list)
+            assert len(data) == 1
+            assert data[0]["host_name"] == "server01"
+            assert "variable_count" in data[0]
+        finally:
+            Path(inv_path).unlink()
+
+    def test_vars_show_command(self):
+        """Test vars show command displays variable details."""
+        import tempfile
+        from pathlib import Path
+
+        yaml_content = """
+webservers:
+  vars:
+    app_name: myapp
+  hosts:
+    web01:
+      ansible_host: 192.168.1.10
+      ansible_user: admin
+      ansible_password: secret
+      custom_var: custom_value
+"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
+            f.write(yaml_content)
+            f.flush()
+            inv_path = f.name
+
+        try:
+            runner = CliRunner()
+            result = runner.invoke(cli, ["vars", "show", "web01", "-i", inv_path])
+
+            assert result.exit_code == 0
+            assert "Variables for web01:" in result.output
+            assert "Groups: webservers" in result.output
+            assert "ansible_host" in result.output
+            assert "192.168.1.10" in result.output
+            assert "app_name" in result.output
+            assert "myapp" in result.output
+            assert "custom_var" in result.output
+            assert "custom_value" in result.output
+        finally:
+            Path(inv_path).unlink()
+
+    def test_vars_show_json(self):
+        """Test vars show command with JSON output."""
+        import json
+        import tempfile
+        from pathlib import Path
+
+        yaml_content = """
+databases:
+  hosts:
+    db01:
+      ansible_host: 10.0.0.5
+      ansible_user: dbuser
+      ansible_password: dbpass
+"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
+            f.write(yaml_content)
+            f.flush()
+            inv_path = f.name
+
+        try:
+            runner = CliRunner()
+            result = runner.invoke(cli, ["vars", "show", "db01", "-i", inv_path, "--format", "json"])
+
+            assert result.exit_code == 0
+            data = json.loads(result.output)
+            assert data["host_name"] == "db01"
+            assert "databases" in data["groups"]
+            assert isinstance(data["variables"], list)
+
+            # Check that variables have expected structure
+            var_names = [v["name"] for v in data["variables"]]
+            assert "ansible_host" in var_names
+            assert "ansible_user" in var_names
+        finally:
+            Path(inv_path).unlink()
+
+    def test_vars_show_unknown_host(self):
+        """Test vars show command with unknown host shows error."""
+        import tempfile
+        from pathlib import Path
+
+        yaml_content = """
+servers:
+  hosts:
+    server01:
+      ansible_host: 10.0.0.1
+      ansible_user: root
+      ansible_password: secret
+"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
+            f.write(yaml_content)
+            f.flush()
+            inv_path = f.name
+
+        try:
+            runner = CliRunner()
+            result = runner.invoke(cli, ["vars", "show", "nonexistent", "-i", inv_path])
+
+            assert result.exit_code != 0
+            assert "not found in inventory" in result.output
+            assert "server01" in result.output  # Shows available hosts
+        finally:
+            Path(inv_path).unlink()
+
+    def test_vars_help(self):
+        """Test vars command help."""
+        runner = CliRunner()
+        result = runner.invoke(cli, ["vars", "--help"])
+
+        assert result.exit_code == 0
+        assert "Variable inspection" in result.output
+        assert "list" in result.output
+        assert "show" in result.output

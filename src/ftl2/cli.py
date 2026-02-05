@@ -17,6 +17,12 @@ from ftl2.executor import ModuleExecutor, ExecutionResults
 from ftl2.inventory import load_inventory, Inventory
 from ftl2.logging import configure_logging, get_logger
 from ftl2.module_docs import discover_modules, extract_module_doc, format_module_list, format_module_list_json
+from ftl2.vars import (
+    collect_host_variables,
+    get_all_host_variables,
+    format_all_hosts_text,
+    format_all_hosts_json,
+)
 from ftl2.runners import ExecutionContext
 from ftl2.types import ExecutionConfig, GateConfig, ModuleResult
 
@@ -519,6 +525,75 @@ def module_doc(name: str, module_dir: tuple[str, ...], output_format: str) -> No
         click.echo("")
         click.echo(doc.format_text())
         click.echo("")
+
+
+# Vars subcommand group
+@cli.group()
+def vars() -> None:
+    """Variable inspection and validation commands."""
+    pass
+
+
+@vars.command("list")
+@click.option("--inventory", "-i", required=True, help="Inventory file (YAML format)")
+@click.option("--format", "-f", "output_format", type=click.Choice(["text", "json"]),
+              default="text", help="Output format")
+def vars_list(inventory: str, output_format: str) -> None:
+    """List all hosts and their variable counts.
+
+    Shows a summary of variables defined for each host in the inventory.
+
+    Examples:
+        ftl2 vars list -i hosts.yml
+
+        ftl2 vars list -i hosts.yml --format json
+    """
+    inv = load_inventory(inventory)
+    all_vars = get_all_host_variables(inv)
+
+    if output_format == "json":
+        output = format_all_hosts_json(all_vars)
+        click.echo(json.dumps(output, indent=2))
+    else:
+        click.echo(format_all_hosts_text(all_vars))
+
+
+@vars.command("show")
+@click.argument("hostname")
+@click.option("--inventory", "-i", required=True, help="Inventory file (YAML format)")
+@click.option("--format", "-f", "output_format", type=click.Choice(["text", "json"]),
+              default="text", help="Output format")
+def vars_show(hostname: str, inventory: str, output_format: str) -> None:
+    """Show all variables for a specific host.
+
+    Displays detailed variable information including:
+    - Variable name and value
+    - Source (host, group, or builtin)
+    - Groups the host belongs to
+
+    Examples:
+        ftl2 vars show web01 -i hosts.yml
+
+        ftl2 vars show db01 -i hosts.yml --format json
+    """
+    inv = load_inventory(inventory)
+    all_hosts = inv.get_all_hosts()
+
+    if hostname not in all_hosts:
+        available = ", ".join(sorted(all_hosts.keys()))
+        raise click.ClickException(
+            f"Host '{hostname}' not found in inventory.\n"
+            f"Available hosts: {available}"
+        )
+
+    host = all_hosts[hostname]
+    host_vars = collect_host_variables(inv, host)
+
+    if output_format == "json":
+        click.echo(json.dumps(host_vars.to_dict(), indent=2))
+    else:
+        click.echo("")
+        click.echo(host_vars.format_text())
 
 
 def parse_module_args(args: str | None) -> dict[str, str]:
