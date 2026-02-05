@@ -98,7 +98,8 @@ class ExecutionConfig:
     Attributes:
         module_name: Name of the module to execute (e.g., "ping", "setup")
         module_dirs: Directories to search for the module
-        module_args: Arguments to pass to the module
+        module_args: Arguments to pass to the module (supports Ref objects)
+        host_args: Host-specific argument overrides (higher precedence than module_args)
         modules: Additional modules to include in gate builds
         dependencies: Python packages required by the module
 
@@ -106,13 +107,15 @@ class ExecutionConfig:
         >>> config = ExecutionConfig(
         ...     module_name="setup",
         ...     module_dirs=[Path("/usr/lib/ftl/modules")],
-        ...     module_args={"gather_subset": "all"}
+        ...     module_args={"gather_subset": "all"},
+        ...     host_args={"web1": {"gather_subset": "minimal"}}
         ... )
     """
 
     module_name: str
     module_dirs: list[Path] = field(default_factory=list)
     module_args: dict[str, Any] = field(default_factory=dict)
+    host_args: dict[str, dict[str, Any]] = field(default_factory=dict)
     modules: list[str] = field(default_factory=list)
     dependencies: list[str] = field(default_factory=list)
 

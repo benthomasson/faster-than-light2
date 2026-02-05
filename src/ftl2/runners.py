@@ -20,6 +20,7 @@ import asyncssh
 from asyncssh.connection import SSHClientConnection
 from asyncssh.process import SSHClientProcess
 
+from .arguments import merge_arguments
 from .exceptions import ModuleExecutionError
 from .gate import GateBuildConfig, GateBuilder
 from .message import GateProtocol
@@ -220,6 +221,13 @@ class LocalModuleRunner(ModuleRunner):
             ModuleExecutionError: If execution fails
         """
         try:
+            # Merge module args with host-specific overrides
+            merged_args = merge_arguments(
+                host,
+                context.execution_config.module_args,
+                context.execution_config.host_args,
+            )
+
             # Find the module
             module_dirs = context.execution_config.module_dirs
             if context.module_dirs_override:
@@ -237,12 +245,12 @@ class LocalModuleRunner(ModuleRunner):
             # Non-Python modules are treated as binary executables
             if module_path.suffix == ".py":
                 if module_wants_json(module_path):
-                    result_data = await self._run_json_module(module_path, context.module_args)
+                    result_data = await self._run_json_module(module_path, merged_args)
                 else:
-                    result_data = await self._run_new_style_module(module_path, context.module_args)
+                    result_data = await self._run_new_style_module(module_path, merged_args)
             else:
                 # No .py extension - treat as binary executable
-                result_data = await self._run_binary_module(module_path, context.module_args)
+                result_data = await self._run_binary_module(module_path, merged_args)
 
             # Parse the result
             if isinstance(result_data, dict):
@@ -395,6 +403,13 @@ class RemoteModuleRunner(ModuleRunner):
         Raises:
             ModuleExecutionError: If module execution fails
         """
+        # Merge module args with host-specific overrides
+        merged_args = merge_arguments(
+            host,
+            context.execution_config.module_args,
+            context.execution_config.host_args,
+        )
+
         # Extract connection parameters from host config
         ssh_host = host.ansible_host if host.ansible_host else host.name
         ssh_port = host.ansible_port if host.ansible_port else 22
@@ -422,7 +437,7 @@ class RemoteModuleRunner(ModuleRunner):
         try:
             # Execute module through gate
             result_data = await self._execute_through_gate(
-                gate, module_path, context.module_name, context.module_args
+                gate, module_path, context.module_name, merged_args
             )
 
             # Cache the gate for reuse
