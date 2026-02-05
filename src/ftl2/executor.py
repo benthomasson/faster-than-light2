@@ -9,6 +9,7 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 
+from .exceptions import FTL2Error
 from .inventory import Inventory
 from .runners import ExecutionContext, ModuleRunnerFactory
 from .types import HostConfig, ModuleResult
@@ -147,8 +148,19 @@ class ModuleExecutor:
             try:
                 result = task.result()
                 results[host_name] = result
+            except FTL2Error as e:
+                # Capture rich error context from FTL2 exceptions
+                logger.error(f"Execution failed on {host_name}: {e}")
+                results[host_name] = ModuleResult(
+                    host_name=host_name,
+                    success=False,
+                    changed=False,
+                    output={},
+                    error=str(e),
+                    error_context=e.context,
+                )
             except Exception as e:
-                # Convert exception to error result
+                # Convert other exceptions to error result
                 logger.exception(f"Execution failed on {host_name}: {e}")
                 results[host_name] = ModuleResult(
                     host_name=host_name,

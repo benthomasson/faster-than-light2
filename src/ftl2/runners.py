@@ -21,7 +21,14 @@ from asyncssh.connection import SSHClientConnection
 from asyncssh.process import SSHClientProcess
 
 from .arguments import merge_arguments
-from .exceptions import ModuleExecutionError
+from .exceptions import (
+    AuthenticationError,
+    ConnectionError,
+    ErrorContext,
+    ErrorTypes,
+    ModuleExecutionError,
+    get_suggestions,
+)
 from .gate import GateBuildConfig, GateBuilder
 from .message import GateProtocol
 from .types import ExecutionConfig, GateConfig, HostConfig, ModuleResult
@@ -676,14 +683,13 @@ class RemoteModuleRunner(ModuleRunner):
 
             except asyncssh.misc.PermissionDenied as e:
                 # Authentication failures should not retry - they won't succeed
-                logger.error(
-                    f"Authentication failed for {ssh_user}@{ssh_host}:{ssh_port}\n"
-                    f"  Auth method: {auth_method}\n"
-                    f"  Suggestion: Verify credentials or SSH key is in authorized_keys"
-                )
-                raise RuntimeError(
-                    f"SSH authentication failed for {ssh_user}@{ssh_host}:{ssh_port} "
-                    f"using {auth_method}"
+                raise AuthenticationError(
+                    message=f"SSH authentication failed using {auth_method}",
+                    host=ssh_host,
+                    host_address=ssh_host,
+                    port=ssh_port,
+                    user=ssh_user,
+                    key_file=ssh_key_file or "",
                 ) from e
 
             except (
@@ -694,30 +700,47 @@ class RemoteModuleRunner(ModuleRunner):
                 OSError,
             ) as e:
                 last_error = e
-                error_type = type(e).__name__
+                python_error_type = type(e).__name__
+
+                # Classify the error
+                if isinstance(e, ConnectionRefusedError):
+                    error_type = ErrorTypes.CONNECTION_REFUSED
+                elif isinstance(e, TimeoutError):
+                    error_type = ErrorTypes.CONNECTION_TIMEOUT
+                else:
+                    error_type = ErrorTypes.HOST_UNREACHABLE
 
                 if attempt < max_retries:
                     # Exponential backoff: 1s, 2s, 4s
                     delay = 2 ** (attempt - 1)
                     logger.warning(
-                        f"Connection to {ssh_host}:{ssh_port} failed ({error_type}), "
+                        f"Connection to {ssh_host}:{ssh_port} failed ({python_error_type}), "
                         f"retrying in {delay}s (attempt {attempt}/{max_retries})"
                     )
                     await asyncio.sleep(delay)
                 else:
-                    logger.error(
-                        f"Failed to connect to {ssh_host}:{ssh_port} after {max_retries} attempts\n"
-                        f"  Last error: {error_type}: {e}\n"
-                        f"  Suggestions:\n"
-                        f"    - Verify host is reachable: ping {ssh_host}\n"
-                        f"    - Check SSH service is running: nc -zv {ssh_host} {ssh_port}\n"
-                        f"    - Verify firewall allows connections"
-                    )
+                    # Final attempt failed - raise with full context
+                    raise ConnectionError(
+                        message=f"Failed to connect after {max_retries} attempts: {python_error_type}",
+                        host=ssh_host,
+                        host_address=ssh_host,
+                        port=ssh_port,
+                        user=ssh_user,
+                        error_type=error_type,
+                        attempt=attempt,
+                        max_attempts=max_retries,
+                    ) from e
 
-        # All retries exhausted
-        raise RuntimeError(
-            f"Failed to connect to {ssh_host}:{ssh_port} after {max_retries} attempts. "
-            f"Last error: {last_error}"
+        # All retries exhausted (should not reach here, but just in case)
+        raise ConnectionError(
+            message=f"Failed to connect after {max_retries} attempts",
+            host=ssh_host,
+            host_address=ssh_host,
+            port=ssh_port,
+            user=ssh_user,
+            error_type=ErrorTypes.CONNECTION_TIMEOUT,
+            attempt=max_retries,
+            max_attempts=max_retries,
         )
 
     async def _check_version(self, conn: SSHClientConnection, interpreter: str) -> None:

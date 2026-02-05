@@ -39,6 +39,8 @@ def format_results_json(
     """
     # Convert ModuleResult objects to dictionaries
     host_results: dict[str, Any] = {}
+    errors_list: list[dict[str, Any]] = []
+
     for host_name, result in results.results.items():
         host_results[host_name] = {
             "success": result.success,
@@ -47,8 +49,14 @@ def format_results_json(
         }
         if result.error:
             host_results[host_name]["error"] = result.error
+            # Include rich error context if available
+            if result.error_context:
+                error_dict = result.error_context.to_dict()
+                error_dict["host"] = host_name
+                errors_list.append(error_dict)
+                host_results[host_name]["error_context"] = error_dict
 
-    output = {
+    output: dict[str, Any] = {
         "module": module,
         "total_hosts": results.total_hosts,
         "successful": results.successful,
@@ -57,6 +65,10 @@ def format_results_json(
         "duration": round(duration, 3),
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+
+    # Add errors summary if there are any
+    if errors_list:
+        output["errors"] = errors_list
 
     return json.dumps(output, indent=2)
 
@@ -94,6 +106,15 @@ def format_results_text(
             if result.output and verbose:
                 for key, value in result.output.items():
                     lines.append(f"    {key}: {value}")
+        lines.append("")
+
+    # Show rich error context for failed hosts
+    failed_results = [r for r in results.results.values() if not r.success and r.error_context]
+    if failed_results:
+        lines.append("Error Details:")
+        for result in failed_results:
+            lines.append("")
+            lines.append(result.error_context.format_text())
         lines.append("")
 
     return "\n".join(lines)

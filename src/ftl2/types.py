@@ -181,6 +181,7 @@ class ModuleResult:
         changed: Whether the module made changes
         output: Module output data
         error: Error message if execution failed
+        error_context: Rich error context for diagnosis (optional)
 
     Example:
         >>> result = ModuleResult(
@@ -198,6 +199,7 @@ class ModuleResult:
     changed: bool = False
     output: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
+    error_context: Any = None  # ErrorContext from exceptions module
 
     @property
     def is_success(self) -> bool:
@@ -226,12 +228,18 @@ class ModuleResult:
         return cls(host_name=host_name, success=True, changed=changed, output=output)
 
     @classmethod
-    def error_result(cls, host_name: str, error: str) -> "ModuleResult":
+    def error_result(
+        cls,
+        host_name: str,
+        error: str,
+        error_context: Any = None,
+    ) -> "ModuleResult":
         """Create an error result.
 
         Args:
             host_name: Host name
             error: Error message
+            error_context: Optional ErrorContext for rich error info
 
         Returns:
             ModuleResult indicating failure
@@ -241,4 +249,5 @@ class ModuleResult:
             success=False,
             output={"error": True, "msg": error},
             error=error,
+            error_context=error_context,
         )

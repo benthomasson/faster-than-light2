@@ -617,3 +617,149 @@ class TestDryRun:
         assert "web01 (deploy@192.168.1.10:2222):" in output
         assert "Would execute: uptime" in output
         assert "Args: cmd=uptime" in output
+
+
+class TestErrorContext:
+    """Tests for rich error context."""
+
+    def test_error_context_to_dict(self):
+        """Test ErrorContext serialization to dictionary."""
+        from ftl2.exceptions import ErrorContext, ErrorTypes
+
+        context = ErrorContext(
+            host="web01",
+            host_address="192.168.1.10:22",
+            user="admin",
+            module="ping",
+            error_type=ErrorTypes.CONNECTION_TIMEOUT,
+            message="Connection timeout after 30s",
+            attempt=3,
+            max_attempts=3,
+            suggestions=["Check network", "Verify firewall"],
+            debug_command="ftl2 test-ssh -i hosts.yml",
+        )
+
+        result = context.to_dict()
+
+        assert result["error_type"] == "ConnectionTimeout"
+        assert result["message"] == "Connection timeout after 30s"
+        assert result["host"] == "web01"
+        assert result["host_address"] == "192.168.1.10:22"
+        assert result["attempt"] == 3
+        assert result["max_attempts"] == 3
+        assert len(result["suggestions"]) == 2
+        assert result["debug_command"] == "ftl2 test-ssh -i hosts.yml"
+
+    def test_error_context_format_text(self):
+        """Test ErrorContext formatting as text."""
+        from ftl2.exceptions import ErrorContext, ErrorTypes
+
+        context = ErrorContext(
+            host="db01",
+            host_address="192.168.1.20:22",
+            user="postgres",
+            module="setup",
+            error_type=ErrorTypes.AUTHENTICATION_FAILED,
+            message="SSH authentication failed",
+            suggestions=["Check SSH key", "Verify credentials"],
+        )
+
+        output = context.format_text()
+
+        assert "Error on host 'db01'" in output
+        assert "Type: AuthenticationFailed" in output
+        assert "Message: SSH authentication failed" in output
+        assert "Host: 192.168.1.20:22" in output
+        assert "User: postgres" in output
+        assert "Suggested Actions:" in output
+        assert "Check SSH key" in output
+
+    def test_format_results_json_with_error_context(self):
+        """Test JSON output includes error context."""
+        import json
+        from ftl2.cli import format_results_json
+        from ftl2.executor import ExecutionResults
+        from ftl2.types import ModuleResult
+        from ftl2.exceptions import ErrorContext, ErrorTypes
+
+        error_ctx = ErrorContext(
+            host="web01",
+            host_address="192.168.1.10:22",
+            user="admin",
+            error_type=ErrorTypes.CONNECTION_TIMEOUT,
+            message="Connection timeout after 30s",
+            suggestions=["Check network connectivity"],
+        )
+
+        results = ExecutionResults(
+            results={
+                "web01": ModuleResult(
+                    host_name="web01",
+                    success=False,
+                    changed=False,
+                    output={},
+                    error="Connection timeout",
+                    error_context=error_ctx,
+                ),
+            }
+        )
+
+        output = format_results_json(results, "ping", 1.5)
+        parsed = json.loads(output)
+
+        assert parsed["failed"] == 1
+        assert "errors" in parsed
+        assert len(parsed["errors"]) == 1
+        assert parsed["errors"][0]["error_type"] == "ConnectionTimeout"
+        assert parsed["errors"][0]["host"] == "web01"
+        assert "suggestions" in parsed["errors"][0]
+
+    def test_format_results_text_with_error_context(self):
+        """Test text output shows error context."""
+        from ftl2.cli import format_results_text
+        from ftl2.executor import ExecutionResults
+        from ftl2.types import ModuleResult
+        from ftl2.exceptions import ErrorContext, ErrorTypes
+
+        error_ctx = ErrorContext(
+            host="db01",
+            host_address="192.168.1.20:5432",
+            error_type=ErrorTypes.CONNECTION_REFUSED,
+            message="Connection refused",
+            suggestions=["Check if service is running", "Verify port is correct"],
+        )
+
+        results = ExecutionResults(
+            results={
+                "db01": ModuleResult(
+                    host_name="db01",
+                    success=False,
+                    changed=False,
+                    output={},
+                    error="Connection refused",
+                    error_context=error_ctx,
+                ),
+            }
+        )
+
+        output = format_results_text(results, verbose=False)
+
+        assert "Error Details:" in output
+        assert "Error on host 'db01'" in output
+        assert "Type: ConnectionRefused" in output
+        assert "Suggested Actions:" in output
+
+    def test_get_suggestions(self):
+        """Test suggestion generation with context substitution."""
+        from ftl2.exceptions import get_suggestions, ErrorTypes
+
+        suggestions = get_suggestions(
+            ErrorTypes.CONNECTION_TIMEOUT,
+            host="web01",
+            host_address="192.168.1.10",
+            port=22,
+        )
+
+        assert len(suggestions) > 0
+        assert any("192.168.1.10" in s for s in suggestions)
+        assert any("22" in s for s in suggestions)
