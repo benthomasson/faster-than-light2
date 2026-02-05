@@ -23,6 +23,13 @@ from ftl2.vars import (
     format_all_hosts_text,
     format_all_hosts_json,
 )
+from ftl2.safety import (
+    check_module_args_safety,
+    format_safety_error,
+    DEFAULT_PARALLEL,
+    DEFAULT_TIMEOUT,
+    MAX_PARALLEL,
+)
 from ftl2.runners import ExecutionContext
 from ftl2.types import ExecutionConfig, GateConfig, ModuleResult
 
@@ -730,6 +737,11 @@ def validate_execution_requirements(inventory, module_name: str, module_dirs: li
 @click.option("--format", "-f", "output_format", type=click.Choice(["text", "json"]),
               default="text", help="Output format (default: text)")
 @click.option("--dry-run", is_flag=True, help="Show what would happen without executing")
+@click.option("--allow-destructive", is_flag=True, help="Allow execution of destructive commands")
+@click.option("--parallel", "-p", type=int, default=DEFAULT_PARALLEL,
+              help=f"Number of concurrent host connections (default: {DEFAULT_PARALLEL}, max: {MAX_PARALLEL})")
+@click.option("--timeout", "-t", type=int, default=DEFAULT_TIMEOUT,
+              help=f"Execution timeout in seconds (default: {DEFAULT_TIMEOUT})")
 @click.option("--debug", is_flag=True, help="Show debug logging")
 @click.option("--verbose", "-v", is_flag=True, help="Show verbose logging")
 def run_module(
@@ -740,6 +752,9 @@ def run_module(
     args: Optional[str],
     output_format: str,
     dry_run: bool,
+    allow_destructive: bool,
+    parallel: int,
+    timeout: int,
     debug: bool,
     verbose: bool,
 ) -> None:
@@ -748,6 +763,11 @@ def run_module(
     Runs the specified automation module on all hosts in the inventory,
     with support for variable references, host-specific arguments, and
     remote execution via SSH.
+
+    Safe defaults are enforced:
+    - Destructive commands require --allow-destructive flag
+    - Default parallel connections: 10 (max: 100)
+    - Default timeout: 300 seconds (5 minutes)
 
     Examples:
         ftl2 run -m ping -i hosts.yml
@@ -759,6 +779,10 @@ def run_module(
         ftl2 run -m shell -i hosts.yml -a "cmd='uptime'" --verbose
 
         ftl2 run -m file -i hosts.yml -a "path=/tmp/test state=absent" --dry-run
+
+        ftl2 run -m shell -i hosts.yml -a "cmd='rm -rf /old'" --allow-destructive
+
+        ftl2 run -m ping -i hosts.yml --parallel 50 --timeout 600
     """
     # Configure logging
     # For JSON output, suppress logging to avoid polluting the output
@@ -770,6 +794,38 @@ def run_module(
         configure_logging(level=logging.INFO)
     else:
         configure_logging(level=logging.WARNING)
+
+    # Validate parallel connections limit
+    if parallel < 1:
+        raise click.ClickException("--parallel must be at least 1")
+    if parallel > MAX_PARALLEL:
+        raise click.ClickException(
+            f"--parallel cannot exceed {MAX_PARALLEL} (requested: {parallel})\n"
+            f"High parallelism can overwhelm target systems."
+        )
+
+    # Validate timeout
+    if timeout < 1:
+        raise click.ClickException("--timeout must be at least 1 second")
+
+    # Parse module arguments for safety check
+    parsed_args = parse_module_args(args)
+
+    # Safety check for destructive commands
+    safety_result = check_module_args_safety(module, parsed_args)
+
+    if safety_result.blocked:
+        # Blocked commands cannot be overridden
+        raise click.ClickException(format_safety_error(safety_result, module))
+
+    if not safety_result.safe and not allow_destructive:
+        # Destructive commands require explicit override
+        raise click.ClickException(format_safety_error(safety_result, module))
+
+    if not safety_result.safe and allow_destructive:
+        # User acknowledged the risk
+        if output_format != "json":
+            click.echo("Warning: Executing destructive command with --allow-destructive flag")
 
     # Load dependencies if requirements file specified
     dependencies = []
@@ -816,7 +872,7 @@ def run_module(
             exec_config = ExecutionConfig(
                 module_name=module,
                 module_dirs=module_dirs,
-                module_args=parse_module_args(args),
+                module_args=parsed_args,
                 modules=[module],
                 dependencies=dependencies,
                 dry_run=dry_run,
@@ -831,8 +887,8 @@ def run_module(
                 gate_config=gate_config,
             )
 
-            # Create executor and run
-            executor = ModuleExecutor()
+            # Create executor and run (parallel controls concurrent connections)
+            executor = ModuleExecutor(chunk_size=parallel)
             try:
                 with logger.scope("Module execution"):
                     results = await executor.run(inv, context)

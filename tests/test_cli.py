@@ -941,3 +941,128 @@ servers:
         assert "Variable inspection" in result.output
         assert "list" in result.output
         assert "show" in result.output
+
+
+class TestSafetyChecks:
+    """Test safety checks and destructive command detection."""
+
+    def test_destructive_command_detected(self):
+        """Test that destructive commands are detected."""
+        from ftl2.safety import check_command_safety
+
+        result = check_command_safety("rm -rf /var/data")
+        assert not result.safe
+        assert not result.blocked
+        assert len(result.warnings) > 0
+
+    def test_blocked_command_detected(self):
+        """Test that blocked commands cannot be overridden."""
+        from ftl2.safety import check_command_safety
+
+        result = check_command_safety("rm -rf /")
+        assert result.blocked
+        assert not result.safe
+        assert "destroy entire filesystem" in result.blocked_reason
+
+    def test_safe_path_allowed(self):
+        """Test that commands on safe paths are allowed."""
+        from ftl2.safety import check_command_safety
+
+        result = check_command_safety("rm -rf /tmp/old_data")
+        assert result.safe
+        assert not result.blocked
+        assert len(result.warnings) == 0
+
+    def test_module_args_safety_shell(self):
+        """Test safety check for shell module."""
+        from ftl2.safety import check_module_args_safety
+
+        result = check_module_args_safety("shell", {"cmd": "rm -rf /var/log/old"})
+        assert not result.safe
+
+        result = check_module_args_safety("shell", {"cmd": "ls -la"})
+        assert result.safe
+
+    def test_module_args_safety_file_absent(self):
+        """Test safety check for file module with state=absent."""
+        from ftl2.safety import check_module_args_safety
+
+        # Removing system file should warn
+        result = check_module_args_safety("file", {"path": "/etc/important.conf", "state": "absent"})
+        assert not result.safe
+
+        # Removing temp file should be fine
+        result = check_module_args_safety("file", {"path": "/tmp/test", "state": "absent"})
+        assert result.safe
+
+    def test_run_destructive_command_blocked(self):
+        """Test that run command blocks destructive commands without flag."""
+        import tempfile
+        from pathlib import Path
+
+        yaml_content = """
+servers:
+  hosts:
+    server01:
+      ansible_host: 10.0.0.1
+      ansible_user: root
+      ansible_password: secret
+"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
+            f.write(yaml_content)
+            f.flush()
+            inv_path = f.name
+
+        try:
+            runner = CliRunner()
+            result = runner.invoke(cli, [
+                "run", "-m", "shell", "-i", inv_path,
+                "-a", "cmd='rm -rf /var/data'"
+            ])
+
+            assert result.exit_code != 0
+            assert "Destructive command detected" in result.output
+            assert "--allow-destructive" in result.output
+        finally:
+            Path(inv_path).unlink()
+
+    def test_run_parallel_limit_enforced(self):
+        """Test that parallel limit is enforced."""
+        import tempfile
+        from pathlib import Path
+
+        yaml_content = """
+servers:
+  hosts:
+    server01:
+      ansible_host: 10.0.0.1
+      ansible_user: root
+      ansible_password: secret
+"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
+            f.write(yaml_content)
+            f.flush()
+            inv_path = f.name
+
+        try:
+            runner = CliRunner()
+            result = runner.invoke(cli, [
+                "run", "-m", "ping", "-i", inv_path,
+                "--parallel", "150"
+            ])
+
+            assert result.exit_code != 0
+            assert "cannot exceed 100" in result.output
+        finally:
+            Path(inv_path).unlink()
+
+    def test_run_help_shows_safe_defaults(self):
+        """Test that run help shows safe defaults information."""
+        runner = CliRunner()
+        result = runner.invoke(cli, ["run", "--help"])
+
+        assert result.exit_code == 0
+        assert "--allow-destructive" in result.output
+        assert "--parallel" in result.output
+        assert "--timeout" in result.output
+        assert "Safe defaults" in result.output
