@@ -1,0 +1,20 @@
+---
+# FTL2 Inventory - Local Execution Example
+#
+# This inventory defines a single host (localhost) configured for local execution.
+# No SSH connection is used - modules run directly on this machine.
+
+all:
+  hosts:
+    localhost:
+      # Connection type: local (no SSH)
+      ansible_connection: local
+
+      # Python interpreter for module execution
+      # Update this path if your Python is located elsewhere
+      ansible_python_interpreter: /usr/bin/python3
+
+      # Optional variables for testing
+      vars:
+        environment: development
+        example_var: "This is a test variable"

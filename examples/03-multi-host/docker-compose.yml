@@ -1,0 +1,131 @@
+---
+# FTL2 Multi-Host Example - Docker Compose Configuration
+#
+# This file defines 3 SSH server containers to simulate a multi-host environment:
+# - web01, web02: Webserver hosts (port 2222, 2223)
+# - db01: Database host (port 2224)
+
+services:
+  # Web Server 1
+  web01:
+    image: lscr.io/linuxserver/openssh-server:latest
+    container_name: ftl2-example-web01
+    hostname: web01
+
+    ports:
+      - "2222:2222"
+
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/New_York
+      - PASSWORD_ACCESS=true
+      - USER_PASSWORD=testpass
+      - USER_NAME=testuser
+      - SUDO_ACCESS=true
+
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "2222"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+    restart: unless-stopped
+
+    networks:
+      - ftl2-network
+
+  # Web Server 2
+  web02:
+    image: lscr.io/linuxserver/openssh-server:latest
+    container_name: ftl2-example-web02
+    hostname: web02
+
+    ports:
+      - "2223:2222"
+
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/New_York
+      - PASSWORD_ACCESS=true
+      - USER_PASSWORD=testpass
+      - USER_NAME=testuser
+      - SUDO_ACCESS=true
+
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "2222"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+    restart: unless-stopped
+
+    networks:
+      - ftl2-network
+
+  # Database Server
+  db01:
+    image: lscr.io/linuxserver/openssh-server:latest
+    container_name: ftl2-example-db01
+    hostname: db01
+
+    ports:
+      - "2224:2222"
+
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/New_York
+      - PASSWORD_ACCESS=true
+      - USER_PASSWORD=testpass
+      - USER_NAME=testuser
+      - SUDO_ACCESS=true
+
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "2222"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+    restart: unless-stopped
+
+    networks:
+      - ftl2-network
+
+# Define network for inter-container communication
+networks:
+  ftl2-network:
+    name: ftl2-multi-host-network
+    driver: bridge
+
+# Notes:
+#
+# Port Mapping:
+#   - web01: localhost:2222 -> container:2222
+#   - web02: localhost:2223 -> container:2222
+#   - db01:  localhost:2224 -> container:2222
+#
+# All containers use port 2222 internally, but map to different
+# host ports to avoid conflicts when running on localhost.
+#
+# Credentials:
+#   - Username: testuser
+#   - Password: testpass
+#   - Same for all containers (not realistic for production)
+#
+# Networking:
+#   - All containers on shared ftl2-network
+#   - Can communicate with each other via hostnames
+#   - Example: web01 can ping db01
+#
+# Scaling:
+#   To add more hosts, copy a service block and:
+#   1. Change service name (web03, db02, etc.)
+#   2. Change container name
+#   3. Change hostname
+#   4. Change host port (2225, 2226, etc.)
+#   5. Update inventory.yml to match

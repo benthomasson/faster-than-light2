@@ -1,0 +1,116 @@
+---
+# FTL2 Inventory - Multi-Host Execution Example
+#
+# This inventory defines multiple hosts organized into groups.
+# - webservers: web01, web02 (port 2222, 2223)
+# - databases: db01 (port 2224)
+
+all:
+  children:
+    # Web Server Group
+    webservers:
+      # Variables shared by all webservers
+      vars:
+        server_role: webserver
+        http_port: 80
+        app_name: example-web-app
+
+      # Individual web server hosts
+      hosts:
+        web01:
+          ansible_host: 127.0.0.1
+          ansible_port: 2222
+          ansible_user: testuser
+          ansible_connection: ssh
+          ansible_python_interpreter: /usr/bin/python3
+          vars:
+            ansible_password: testpass
+            server_id: 1
+
+        web02:
+          ansible_host: 127.0.0.1
+          ansible_port: 2223
+          ansible_user: testuser
+          ansible_connection: ssh
+          ansible_python_interpreter: /usr/bin/python3
+          vars:
+            ansible_password: testpass
+            server_id: 2
+
+    # Database Server Group
+    databases:
+      # Variables shared by all database servers
+      vars:
+        server_role: database
+        db_port: 5432
+        db_name: production
+
+      # Individual database hosts
+      hosts:
+        db01:
+          ansible_host: 127.0.0.1
+          ansible_port: 2224
+          ansible_user: testuser
+          ansible_connection: ssh
+          ansible_python_interpreter: /usr/bin/python3
+          vars:
+            ansible_password: testpass
+            server_id: 1
+
+# Notes:
+#
+# Group Hierarchy:
+#   all
+#   ├── webservers
+#   │   ├── web01
+#   │   └── web02
+#   └── databases
+#       └── db01
+#
+# Targeting Hosts:
+#   - All hosts:        ftl2 -m ping -i inventory.yml
+#   - Webservers only:  ftl2 -m ping -i inventory.yml --limit webservers
+#   - Databases only:   ftl2 -m ping -i inventory.yml --limit databases
+#   - Specific host:    ftl2 -m ping -i inventory.yml --limit web01
+#   - Pattern match:    ftl2 -m ping -i inventory.yml --limit "web*"
+#   - Exclude group:    ftl2 -m ping -i inventory.yml --limit "!databases"
+#
+# Variable Inheritance:
+#   - Group variables are inherited by all hosts in the group
+#   - Example: web01 inherits server_role=webserver from webservers group
+#   - Host-specific vars override group vars
+#   - Example: web01 has server_id=1, web02 has server_id=2
+#
+# Built-in Groups:
+#   - all: Contains all hosts (always available)
+#   - ungrouped: Hosts not assigned to any group
+#
+# Variable Precedence (last wins):
+#   1. Group variables (groups.<group>.vars)
+#   2. Host variables (hosts.<host>.vars)
+#   3. Module arguments (-a flag)
+#
+# SSH Configuration:
+#   - All hosts use password authentication (ansible_password)
+#   - In production, use SSH keys instead
+#   - Set up SSH keys: ssh-keygen && ssh-copy-id -p 2222 testuser@localhost
+#
+# Connection Settings:
+#   - ansible_connection: ssh (enables remote execution)
+#   - ansible_python_interpreter: Python path on remote host
+#   - ansible_host: Target IP or hostname
+#   - ansible_port: SSH port (default 22)
+#   - ansible_user: SSH username
+#
+# Security Warning:
+#   This inventory uses:
+#   - Password authentication (not recommended for production)
+#   - Same password for all hosts (never do this in production)
+#   - Disabled host key checking (dangerous in production)
+#
+#   For production environments:
+#   - Use unique SSH keys per host
+#   - Enable strict host key checking
+#   - Implement secrets management
+#   - Use SSH bastion hosts
+#   - Enable audit logging

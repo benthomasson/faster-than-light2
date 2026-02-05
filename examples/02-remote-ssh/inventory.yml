@@ -1,0 +1,50 @@
+---
+# FTL2 Inventory - Remote SSH Execution Example
+#
+# This inventory defines a remote host accessed via SSH.
+# The target is a Docker container running on localhost:2222.
+
+all:
+  hosts:
+    remote-server:
+      # SSH connection details
+      ansible_host: 127.0.0.1
+      ansible_port: 2222
+      ansible_user: testuser
+
+      # Connection type: ssh (enables remote execution)
+      ansible_connection: ssh
+
+      # Python interpreter on remote host
+      ansible_python_interpreter: /usr/bin/python3
+
+      # Variables (including password for authentication)
+      vars:
+        # Password authentication (not recommended for production)
+        # In production, use SSH keys instead
+        ansible_password: testpass
+
+        # Optional: Custom variables for testing
+        environment: development
+        example_var: "Remote execution test"
+
+# Notes:
+#
+# Password Authentication:
+#   The ansible_password is stored in vars for this example.
+#   For production, remove this and use SSH key authentication.
+#
+# SSH Key Authentication:
+#   1. Generate SSH key: ssh-keygen -t rsa -b 4096
+#   2. Copy to remote: ssh-copy-id -p 2222 testuser@localhost
+#   3. Remove ansible_password from inventory
+#   4. FTL2 will use your default SSH key automatically
+#
+# SSH Options:
+#   FTL2 automatically sets:
+#   - known_hosts: None (disables host key checking for this example)
+#   - connect_timeout: 3600 seconds
+#
+# Connection Reuse:
+#   FTL2 reuses SSH connections when running multiple modules
+#   against the same host for improved performance.

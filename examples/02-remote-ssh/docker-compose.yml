@@ -1,0 +1,54 @@
+---
+# FTL2 Remote SSH Example - Docker Compose Configuration
+#
+# This file defines an SSH server container for testing remote execution.
+# The container runs Alpine Linux with OpenSSH and Python 3.
+
+services:
+  remote-server:
+    # Linux Server OpenSSH container
+    image: lscr.io/linuxserver/openssh-server:latest
+
+    container_name: ftl2-example-remote
+
+    # SSH server port mapping
+    # Host port 2222 -> Container port 2222
+    ports:
+      - "2222:2222"
+
+    # Environment configuration
+    environment:
+      # User/group ID
+      - PUID=1000
+      - PGID=1000
+
+      # Timezone
+      - TZ=America/New_York
+
+      # Enable password authentication (not recommended for production)
+      - PASSWORD_ACCESS=true
+
+      # Set user password
+      - USER_PASSWORD=testpass
+
+      # Set username
+      - USER_NAME=testuser
+
+      # Enable sudo access
+      - SUDO_ACCESS=true
+
+    # Health check to verify SSH is ready
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "2222"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+    # Restart policy
+    restart: unless-stopped
+
+# Optional: Define a network
+networks:
+  default:
+    name: ftl2-example-network

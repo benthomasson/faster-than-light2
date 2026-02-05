@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import shlex
 from pathlib import Path
 from pprint import pprint
 from typing import Optional
@@ -22,11 +23,12 @@ def parse_module_args(args: str | None) -> dict[str, str]:
     """Parse module arguments from command-line string into dictionary format.
 
     Converts a space-separated string of key=value pairs into a dictionary
-    suitable for passing to automation modules.
+    suitable for passing to automation modules. Properly handles quoted values.
 
     Args:
         args: String containing space-separated key=value pairs. Can be empty
             or None. Example: "host=example.com port=80 debug=true"
+            Supports quoted values: "cmd='echo hello' path=/tmp/file"
 
     Returns:
         Dictionary mapping argument keys to values. All keys and values are
@@ -45,13 +47,29 @@ def parse_module_args(args: str | None) -> dict[str, str]:
 
         >>> parse_module_args("path=/tmp/test state=touch")
         {'path': '/tmp/test', 'state': 'touch'}
+
+        >>> parse_module_args("cmd='echo hello world'")
+        {'cmd': 'echo hello world'}
     """
     if not args:
         return {}
 
-    key_value_pairs = args.split(" ")
-    key_value_tuples = [tuple(i.split("=")) for i in key_value_pairs]
-    return {k: v for k, v in key_value_tuples}
+    # Use shlex to properly handle quoted strings
+    try:
+        key_value_pairs = shlex.split(args)
+    except ValueError as e:
+        raise ValueError(f"Failed to parse arguments: {e}") from e
+
+    result = {}
+    for pair in key_value_pairs:
+        if "=" not in pair:
+            raise ValueError(f"Invalid argument format: '{pair}'. Expected key=value format.")
+
+        # Split on first = only to handle values with =
+        key, value = pair.split("=", 1)
+        result[key] = value
+
+    return result
 
 
 @click.command()
@@ -113,6 +131,13 @@ def main(
 
     # Build module directories list
     module_dirs = []
+
+    # Add default built-in modules directory
+    default_module_dir = Path(__file__).parent / "modules"
+    if default_module_dir.exists():
+        module_dirs.append(default_module_dir)
+
+    # Add user-specified module directory if provided
     if module_dir:
         module_dirs.append(Path(module_dir))
 
