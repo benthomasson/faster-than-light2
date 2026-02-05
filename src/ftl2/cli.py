@@ -11,10 +11,11 @@ import click
 from ftl2 import __version__
 from ftl2.executor import ModuleExecutor
 from ftl2.inventory import load_inventory
+from ftl2.logging import configure_logging, get_logger
 from ftl2.runners import ExecutionContext
 from ftl2.types import ExecutionConfig, GateConfig
 
-logger = logging.getLogger("ftl2.cli")
+logger = get_logger("ftl2.cli")
 
 
 def parse_module_args(args: str | None) -> dict[str, str]:
@@ -98,11 +99,11 @@ def main(
 
     # Configure logging
     if debug:
-        logging.basicConfig(level=logging.DEBUG, format="%(levelname)s: %(message)s")
+        configure_logging(level=logging.DEBUG, debug=True)
     elif verbose:
-        logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+        configure_logging(level=logging.INFO)
     else:
-        logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
+        configure_logging(level=logging.WARNING)
 
     # Load dependencies if requirements file specified
     dependencies = []
@@ -117,50 +118,62 @@ def main(
 
     async def run_async() -> None:
         """Inner async function to handle async operations."""
-        # Load inventory
-        inv = load_inventory(inventory)
+        # Add module context to logger
+        logger.add_context(module=module)
 
-        # Create execution configuration
-        exec_config = ExecutionConfig(
-            module_name=module,
-            module_dirs=module_dirs,
-            module_args=parse_module_args(args),
-            modules=[module],
-            dependencies=dependencies,
-        )
+        with logger.performance("Total execution", module=module):
+            # Load inventory
+            logger.debug("Loading inventory", file=inventory)
+            inv = load_inventory(inventory)
+            logger.info("Inventory loaded", hosts=len(inv.get_all_hosts()))
 
-        # Create gate configuration
-        gate_config = GateConfig()
+            # Create execution configuration
+            exec_config = ExecutionConfig(
+                module_name=module,
+                module_dirs=module_dirs,
+                module_args=parse_module_args(args),
+                modules=[module],
+                dependencies=dependencies,
+            )
 
-        # Create execution context
-        context = ExecutionContext(
-            execution_config=exec_config,
-            gate_config=gate_config,
-        )
+            # Create gate configuration
+            gate_config = GateConfig()
 
-        # Create executor and run
-        executor = ModuleExecutor()
-        try:
-            results = await executor.run(inv, context)
+            # Create execution context
+            context = ExecutionContext(
+                execution_config=exec_config,
+                gate_config=gate_config,
+            )
 
-            # Display results
-            click.echo(f"\nExecution Results:")
-            click.echo(f"Total hosts: {results.total_hosts}")
-            click.echo(f"Successful: {results.successful}")
-            click.echo(f"Failed: {results.failed}")
-            click.echo()
+            # Create executor and run
+            executor = ModuleExecutor()
+            try:
+                with logger.scope("Module execution"):
+                    results = await executor.run(inv, context)
 
-            if verbose or debug:
-                click.echo("Detailed Results:")
-                pprint(results.results)
+                # Display results
+                click.echo(f"\nExecution Results:")
+                click.echo(f"Total hosts: {results.total_hosts}")
+                click.echo(f"Successful: {results.successful}")
+                click.echo(f"Failed: {results.failed}")
+                click.echo()
 
-            # Exit with error if any host failed
-            if not results.is_success():
-                raise click.ClickException(f"{results.failed} host(s) failed execution")
+                if verbose or debug:
+                    click.echo("Detailed Results:")
+                    pprint(results.results)
 
-        finally:
-            # Clean up resources
-            await executor.cleanup()
+                logger.info("Execution complete",
+                           successful=results.successful,
+                           failed=results.failed)
+
+                # Exit with error if any host failed
+                if not results.is_success():
+                    raise click.ClickException(f"{results.failed} host(s) failed execution")
+
+            finally:
+                # Clean up resources
+                logger.debug("Cleaning up resources")
+                await executor.cleanup()
 
     # Run the async operations
     asyncio.run(run_async())
