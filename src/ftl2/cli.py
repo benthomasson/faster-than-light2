@@ -16,6 +16,7 @@ from ftl2 import __version__
 from ftl2.executor import ModuleExecutor, ExecutionResults
 from ftl2.inventory import load_inventory, Inventory
 from ftl2.logging import configure_logging, get_logger
+from ftl2.module_docs import discover_modules, extract_module_doc, format_module_list, format_module_list_json
 from ftl2.runners import ExecutionContext
 from ftl2.types import ExecutionConfig, GateConfig, ModuleResult
 
@@ -415,6 +416,109 @@ def test_ssh(inventory: str, timeout: int) -> None:
 
     if fail_count > 0:
         raise click.ClickException(f"{fail_count} host(s) failed SSH connectivity test")
+
+
+# Module subcommand group
+@cli.group()
+def module() -> None:
+    """Module discovery and documentation commands."""
+    pass
+
+
+def _get_module_dirs(module_dir: tuple[str, ...]) -> list[Path]:
+    """Build list of module directories to search.
+
+    Args:
+        module_dir: User-specified module directories
+
+    Returns:
+        List of Path objects to search for modules
+    """
+    module_dirs = []
+
+    # Add user-specified directories first
+    for user_dir in module_dir:
+        module_dirs.append(Path(user_dir))
+
+    # Add built-in modules directory
+    default_module_dir = Path(__file__).parent / "modules"
+    if default_module_dir.exists():
+        module_dirs.append(default_module_dir)
+
+    return module_dirs
+
+
+@module.command("list")
+@click.option("--module-dir", "-M", multiple=True, help="Additional module directory to search")
+@click.option("--format", "-f", "output_format", type=click.Choice(["text", "json"]),
+              default="text", help="Output format")
+def module_list(module_dir: tuple[str, ...], output_format: str) -> None:
+    """List all available modules.
+
+    Shows all modules found in module directories with their descriptions.
+
+    Examples:
+        ftl2 module list
+
+        ftl2 module list -M ./my_modules
+
+        ftl2 module list --format json
+    """
+    module_dirs = _get_module_dirs(module_dir)
+    modules = discover_modules(module_dirs)
+
+    if output_format == "json":
+        output = format_module_list_json(modules)
+        click.echo(json.dumps(output, indent=2))
+    else:
+        click.echo(format_module_list(modules))
+
+
+@module.command("doc")
+@click.argument("name")
+@click.option("--module-dir", "-M", multiple=True, help="Additional module directory to search")
+@click.option("--format", "-f", "output_format", type=click.Choice(["text", "json"]),
+              default="text", help="Output format")
+def module_doc(name: str, module_dir: tuple[str, ...], output_format: str) -> None:
+    """Show documentation for a specific module.
+
+    Displays detailed documentation including arguments, return values,
+    and usage examples.
+
+    Examples:
+        ftl2 module doc ping
+
+        ftl2 module doc file --format json
+
+        ftl2 module doc shell -M ./my_modules
+    """
+    module_dirs = _get_module_dirs(module_dir)
+
+    # Find the module
+    module_path = None
+    for dir_path in module_dirs:
+        candidate = dir_path / f"{name}.py"
+        if candidate.exists():
+            module_path = candidate
+            break
+
+    if module_path is None:
+        # List available modules in error message
+        modules = discover_modules(module_dirs)
+        available = ", ".join(m.name for m in modules)
+        raise click.ClickException(
+            f"Module '{name}' not found.\n"
+            f"Available modules: {available}"
+        )
+
+    doc = extract_module_doc(module_path)
+
+    if output_format == "json":
+        click.echo(json.dumps(doc.to_dict(), indent=2))
+    else:
+        click.echo("")
+        click.echo(doc.format_text())
+        click.echo("")
 
 
 def parse_module_args(args: str | None) -> dict[str, str]:
