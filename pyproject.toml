@@ -59,6 +59,9 @@ addopts = [
 [tool.coverage.run]
 source = ["src"]
 branch = true
+omit = [
+    "src/ftl2/ftl_gate/__main__.py",  # Gate runtime runs as subprocess, not unit tested
+]
 
 [tool.coverage.report]
 show_missing = true
@@ -84,9 +87,10 @@ select = [
     "TCH",  # flake8-type-checking
 ]
 ignore = [
-    "E501",  # line too long (handled by formatter)
-    "N818",  # exception naming (ModuleNotFound matches Python convention)
-    "UP047", # generic type parameters (not needed for simple cases)
+    "E501",   # line too long (handled by formatter)
+    "N818",   # exception naming (ModuleNotFound matches Python convention)
+    "UP047",  # generic type parameters (not needed for simple cases)
+    "SIM105", # try-except-pass is clearer than contextlib.suppress in shutdown code
 ]
 
 [tool.ruff.lint.per-file-ignores]
