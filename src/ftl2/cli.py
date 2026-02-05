@@ -72,6 +72,78 @@ def parse_module_args(args: str | None) -> dict[str, str]:
     return result
 
 
+def validate_execution_requirements(inventory, module_name: str, module_dirs: list[Path]) -> None:
+    """Validate all requirements before attempting execution.
+
+    Performs pre-flight checks to catch configuration errors early:
+    - Module exists in search paths
+    - SSH hosts have authentication configured
+    - SSH key files exist if specified
+
+    Args:
+        inventory: Loaded inventory object
+        module_name: Name of module to execute
+        module_dirs: List of directories to search for modules
+
+    Raises:
+        ValueError: If any validation check fails with detailed error message
+
+    Example:
+        >>> validate_execution_requirements(inv, "ping", [Path("/modules")])
+    """
+    from ftl2.inventory import Inventory
+
+    # 1. Check module exists
+    module_found = False
+    for module_dir in module_dirs:
+        if (module_dir / f"{module_name}.py").exists():
+            module_found = True
+            break
+
+    if not module_found:
+        # List available modules for helpful error message
+        available_modules = []
+        for module_dir in module_dirs:
+            if module_dir.exists():
+                available_modules.extend([m.stem for m in module_dir.glob("*.py")])
+
+        error_msg = f"Module '{module_name}' not found in:\n"
+        error_msg += "\n".join(f"  - {d}" for d in module_dirs)
+
+        if available_modules:
+            error_msg += f"\n\nAvailable modules:\n"
+            error_msg += "\n".join(f"  - {m}" for m in sorted(set(available_modules)))
+        else:
+            error_msg += f"\n\nNo modules found in search paths"
+
+        raise ValueError(error_msg)
+
+    # 2. For remote hosts, validate SSH configuration
+    all_hosts = inventory.get_all_hosts()
+    for host_name, host in all_hosts.items():
+        if host.ansible_connection == "ssh":
+            ssh_password = host.get_var("ansible_password")
+            ssh_key_file = host.get_var("ssh_private_key_file")
+
+            # Check that at least one auth method is configured
+            if not ssh_password and not ssh_key_file:
+                raise ValueError(
+                    f"Host '{host_name}': No SSH authentication configured\n"
+                    f"  Set either:\n"
+                    f"    - ansible_password: 'password'\n"
+                    f"    - ssh_private_key_file: ~/.ssh/id_rsa"
+                )
+
+            # Check that SSH key file exists if specified
+            if ssh_key_file:
+                expanded = Path(ssh_key_file).expanduser()
+                if not expanded.exists():
+                    raise ValueError(
+                        f"Host '{host_name}': SSH key not found: {expanded}\n"
+                        f"  Generate with: ssh-keygen -t rsa -f {expanded}"
+                    )
+
+
 @click.command()
 @click.option("--module", "-m", help="Module to execute")
 @click.option("--module-dir", "-M", help="Module directory to search for modules")
@@ -151,6 +223,11 @@ def main(
             logger.debug("Loading inventory", file=inventory)
             inv = load_inventory(inventory)
             logger.info("Inventory loaded", hosts=len(inv.get_all_hosts()))
+
+            # Validate execution requirements (fail-fast)
+            logger.debug("Validating execution requirements")
+            validate_execution_requirements(inv, module, module_dirs)
+            logger.debug("Validation passed")
 
             # Create execution configuration
             exec_config = ExecutionConfig(

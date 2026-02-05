@@ -165,16 +165,17 @@ class TestLoadInventory:
     """Tests for load_inventory function."""
 
     def test_load_empty_file(self):
-        """Test loading an empty inventory file."""
+        """Test loading an empty inventory file raises ValueError."""
+        import pytest
+
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
             f.write("")
             f.flush()
             path = Path(f.name)
 
         try:
-            inventory = load_inventory(path)
-            assert len(inventory.groups) == 0
-            assert len(inventory.get_all_hosts()) == 0
+            with pytest.raises(ValueError, match="No hosts loaded from inventory"):
+                load_inventory(path)
         finally:
             path.unlink()
 
@@ -292,6 +293,58 @@ all:
 
             assert web01 is not None
             assert web01.vars == {"custom_var": "value1", "app_port": 8080}
+        finally:
+            path.unlink()
+
+    def test_load_inventory_with_no_hosts(self):
+        """Test loading inventory with groups but no hosts raises ValueError."""
+        import pytest
+
+        yaml_content = """
+webservers:
+  vars:
+    http_port: 80
+databases:
+  vars:
+    db_port: 5432
+"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
+            f.write(yaml_content)
+            f.flush()
+            path = Path(f.name)
+
+        try:
+            with pytest.raises(ValueError, match="No hosts loaded from inventory"):
+                load_inventory(path)
+        finally:
+            path.unlink()
+
+    def test_load_inventory_with_nested_structure(self):
+        """Test loading inventory with nested all.children structure raises ValueError.
+
+        This test captures the multi-host example issue where hosts were defined
+        under all.children.webservers instead of webservers directly.
+        """
+        import pytest
+
+        yaml_content = """
+all:
+  children:
+    webservers:
+      hosts:
+        web01:
+          ansible_host: 192.168.1.10
+"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
+            f.write(yaml_content)
+            f.flush()
+            path = Path(f.name)
+
+        try:
+            # This should raise ValueError because FTL2 doesn't process
+            # nested children - it only looks at top-level groups
+            with pytest.raises(ValueError, match="No hosts loaded from inventory"):
+                load_inventory(path)
         finally:
             path.unlink()
 

@@ -119,61 +119,105 @@ def load_inventory(inventory_file: str | Path) -> Inventory:
     Returns:
         Inventory object with typed groups and hosts
 
+    Raises:
+        ValueError: If no hosts are loaded from the inventory file
+
     Example:
         >>> inventory = load_inventory("hosts.yml")
         >>> hosts = inventory.get_all_hosts()
         >>> web01 = hosts.get("web01")
+
+    Note:
+        Expected structure (groups at top level, NOT nested under 'all'):
+
+            webservers:
+              hosts:
+                web01:
+                  ansible_host: 127.0.0.1
+                  ansible_port: 2222
+
+            databases:
+              hosts:
+                db01:
+                  ansible_host: 127.0.0.1
+
+        Nested structure like 'all.children.webservers' is NOT supported.
+        FTL2 only processes top-level group names.
     """
     path = Path(inventory_file) if isinstance(inventory_file, str) else inventory_file
 
     with path.open() as f:
         data = yaml.safe_load(f.read())
 
-    if not data:
-        return Inventory()
-
     inventory = Inventory()
 
-    # Process each group in the inventory
-    for group_name, group_data in data.items():
-        if not isinstance(group_data, dict):
-            continue
+    # Process each group in the inventory (skip if data is None/empty)
+    if data:
+        for group_name, group_data in data.items():
+            if not isinstance(group_data, dict):
+                continue
 
-        group = HostGroup(name=group_name)
+            group = HostGroup(name=group_name)
 
-        # Process hosts in this group
-        if "hosts" in group_data and isinstance(group_data["hosts"], dict):
-            for host_name, host_data in group_data["hosts"].items():
-                if not isinstance(host_data, dict):
-                    host_data = {}
+            # Process hosts in this group
+            if "hosts" in group_data and isinstance(group_data["hosts"], dict):
+                for host_name, host_data in group_data["hosts"].items():
+                    if not isinstance(host_data, dict):
+                        host_data = {}
 
-                # Create HostConfig from host data
-                host = HostConfig(
-                    name=host_name,
-                    ansible_host=host_data.get("ansible_host", host_name),
-                    ansible_port=host_data.get("ansible_port", 22),
-                    ansible_user=host_data.get("ansible_user", ""),
-                    ansible_connection=host_data.get("ansible_connection", "ssh"),
-                    ansible_python_interpreter=host_data.get(
-                        "ansible_python_interpreter", "python3"
-                    ),
-                    vars={k: v for k, v in host_data.items() if not k.startswith("ansible_")},
-                )
+                    # Standard ansible_ fields that map to HostConfig attributes
+                    standard_fields = {
+                        "ansible_host",
+                        "ansible_port",
+                        "ansible_user",
+                        "ansible_connection",
+                        "ansible_python_interpreter",
+                    }
 
-                group.add_host(host)
+                    # Create HostConfig from host data
+                    host = HostConfig(
+                        name=host_name,
+                        ansible_host=host_data.get("ansible_host", host_name),
+                        ansible_port=host_data.get("ansible_port", 22),
+                        ansible_user=host_data.get("ansible_user", ""),
+                        ansible_connection=host_data.get("ansible_connection", "ssh"),
+                        ansible_python_interpreter=host_data.get(
+                            "ansible_python_interpreter", "python3"
+                        ),
+                        # Put all other fields (including ansible_password) into vars
+                        vars={k: v for k, v in host_data.items() if k not in standard_fields},
+                    )
 
-        # Process group vars
-        if "vars" in group_data and isinstance(group_data["vars"], dict):
-            group.vars = group_data["vars"]
+                    group.add_host(host)
 
-        # Process children
-        if "children" in group_data:
-            if isinstance(group_data["children"], list):
-                group.children = group_data["children"]
-            elif isinstance(group_data["children"], dict):
-                group.children = list(group_data["children"].keys())
+            # Process group vars
+            if "vars" in group_data and isinstance(group_data["vars"], dict):
+                group.vars = group_data["vars"]
 
-        inventory.add_group(group)
+            # Process children
+            if "children" in group_data:
+                if isinstance(group_data["children"], list):
+                    group.children = group_data["children"]
+                elif isinstance(group_data["children"], dict):
+                    group.children = list(group_data["children"].keys())
+
+            inventory.add_group(group)
+
+    # Validate that at least one host was loaded
+    all_hosts = inventory.get_all_hosts()
+    if not all_hosts:
+        raise ValueError(
+            f"No hosts loaded from inventory '{path}'\n"
+            f"  Possible causes:\n"
+            f"  - Using nested 'all.children' structure (not supported)\n"
+            f"  - No hosts defined in top-level groups\n"
+            f"  - Empty or malformed YAML\n\n"
+            f"  Expected structure:\n"
+            f"    groupname:\n"
+            f"      hosts:\n"
+            f"        hostname:\n"
+            f"          ansible_host: 127.0.0.1"
+        )
 
     return inventory
 
