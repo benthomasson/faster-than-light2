@@ -36,6 +36,13 @@ from ftl2.retry import (
     RetryStats,
     is_transient_error,
 )
+from ftl2.state import (
+    ExecutionState,
+    load_state,
+    save_state,
+    create_state_from_results,
+    filter_hosts_for_resume,
+)
 from ftl2.runners import ExecutionContext
 from ftl2.types import ExecutionConfig, GateConfig, ModuleResult
 
@@ -769,6 +776,10 @@ def validate_execution_requirements(inventory, module_name: str, module_dirs: li
               help="Only retry transient errors (connection timeout, etc.)")
 @click.option("--circuit-breaker", type=float, default=0,
               help="Stop if failure percentage exceeds threshold (e.g., 30 for 30%%)")
+@click.option("--state-file", type=click.Path(), default=None,
+              help="Save execution state to file for resume capability")
+@click.option("--resume", type=click.Path(exists=True), default=None,
+              help="Resume from previous state file, skipping succeeded hosts")
 @click.option("--debug", is_flag=True, help="Show debug logging")
 @click.option("--verbose", "-v", is_flag=True, help="Show verbose logging")
 def run_module(
@@ -786,6 +797,8 @@ def run_module(
     retry_delay: float,
     smart_retry: bool,
     circuit_breaker: float,
+    state_file: Optional[str],
+    resume: Optional[str],
     debug: bool,
     verbose: bool,
 ) -> None:
@@ -805,6 +818,10 @@ def run_module(
     - --smart-retry: Only retry transient errors (timeouts, connection issues)
     - --circuit-breaker N: Stop if N% of hosts are failing
 
+    State tracking:
+    - --state-file FILE: Save results for later resume
+    - --resume FILE: Resume from previous run, skip succeeded hosts
+
     Examples:
         ftl2 run -m ping -i hosts.yml
 
@@ -823,6 +840,10 @@ def run_module(
         ftl2 run -m ping -i hosts.yml --retry 3 --smart-retry
 
         ftl2 run -m setup -i hosts.yml --retry 2 --circuit-breaker 30
+
+        ftl2 run -m copy -i hosts.yml -a "src=app.tgz dest=/opt/" --state-file /tmp/deploy.json
+
+        ftl2 run -m copy -i hosts.yml -a "src=app.tgz dest=/opt/" --resume /tmp/deploy.json
     """
     # Configure logging
     # For JSON output, suppress logging to avoid polluting the output
@@ -903,6 +924,38 @@ def run_module(
             inv = load_inventory(inventory)
             logger.info("Inventory loaded", hosts=len(inv.get_all_hosts()))
 
+            # Handle resume mode - filter out already-succeeded hosts
+            previous_state = None
+            skipped_hosts: set[str] = set()
+            if resume:
+                previous_state = load_state(resume)
+                if previous_state:
+                    all_host_names = set(inv.get_all_hosts().keys())
+                    hosts_to_run, skipped_hosts, new_hosts = filter_hosts_for_resume(
+                        all_host_names, previous_state
+                    )
+
+                    if output_format != "json":
+                        click.echo(previous_state.format_resume_summary(all_host_names))
+
+                    if not hosts_to_run:
+                        click.echo("All hosts already succeeded. Nothing to do.")
+                        return ExecutionResults(), 0.0
+
+                    # Filter inventory to only run on needed hosts
+                    # We'll do this by removing succeeded hosts from groups
+                    for group in inv.list_groups():
+                        group.hosts = {
+                            name: host for name, host in group.hosts.items()
+                            if name in hosts_to_run
+                        }
+                    inv._invalidate_cache()
+
+                    logger.info(
+                        f"Resume mode: running on {len(hosts_to_run)} hosts, "
+                        f"skipping {len(skipped_hosts)} succeeded hosts"
+                    )
+
             # Validate execution requirements (fail-fast)
             logger.debug("Validating execution requirements")
             validate_execution_requirements(inv, module, module_dirs)
@@ -964,6 +1017,15 @@ def run_module(
 
     # Run the async operations
     results, duration = asyncio.run(run_async())
+
+    # Save state if state-file specified (not for dry-run)
+    if state_file and not dry_run and results.results:
+        exec_state = create_state_from_results(
+            results, module, parsed_args, inventory
+        )
+        save_state(exec_state, state_file)
+        if output_format != "json":
+            click.echo(f"State saved to {state_file}")
 
     # Display results based on format and mode
     if dry_run:

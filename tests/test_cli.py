@@ -1176,3 +1176,168 @@ class TestRetryLogic:
         assert "--smart-retry" in result.output
         assert "--circuit-breaker" in result.output
         assert "Retry options" in result.output
+
+
+class TestStateTracking:
+    """Test state tracking and resume functionality."""
+
+    def test_host_state_serialization(self):
+        """Test HostState to/from dict."""
+        from ftl2.state import HostState
+
+        state = HostState(
+            host_name="web01",
+            success=True,
+            changed=True,
+            timestamp="2026-02-05T12:00:00Z",
+            attempts=2,
+        )
+
+        data = state.to_dict()
+        assert data["host_name"] == "web01"
+        assert data["success"] is True
+        assert data["changed"] is True
+
+        restored = HostState.from_dict(data)
+        assert restored.host_name == "web01"
+        assert restored.success is True
+
+    def test_execution_state_serialization(self):
+        """Test ExecutionState to/from dict."""
+        from ftl2.state import ExecutionState, HostState
+
+        state = ExecutionState(
+            module="ping",
+            args={"data": "hello"},
+            inventory_file="hosts.yml",
+            timestamp="2026-02-05T12:00:00Z",
+            completed=True,
+            hosts={
+                "web01": HostState("web01", success=True),
+                "web02": HostState("web02", success=False, error="timeout"),
+            },
+            total_hosts=2,
+            successful=1,
+            failed=1,
+        )
+
+        data = state.to_dict()
+        assert data["module"] == "ping"
+        assert data["total_hosts"] == 2
+        assert "web01" in data["hosts"]
+
+        restored = ExecutionState.from_dict(data)
+        assert restored.module == "ping"
+        assert len(restored.hosts) == 2
+        assert restored.hosts["web01"].success is True
+        assert restored.hosts["web02"].success is False
+
+    def test_get_succeeded_failed_hosts(self):
+        """Test getting succeeded and failed hosts from state."""
+        from ftl2.state import ExecutionState, HostState
+
+        state = ExecutionState(
+            module="ping",
+            hosts={
+                "web01": HostState("web01", success=True),
+                "web02": HostState("web02", success=True),
+                "db01": HostState("db01", success=False),
+            },
+        )
+
+        succeeded = state.get_succeeded_hosts()
+        failed = state.get_failed_hosts()
+
+        assert succeeded == {"web01", "web02"}
+        assert failed == {"db01"}
+
+    def test_get_pending_hosts(self):
+        """Test getting pending (new) hosts."""
+        from ftl2.state import ExecutionState, HostState
+
+        state = ExecutionState(
+            module="ping",
+            hosts={
+                "web01": HostState("web01", success=True),
+                "web02": HostState("web02", success=False),
+            },
+        )
+
+        all_hosts = {"web01", "web02", "web03", "db01"}
+        pending = state.get_pending_hosts(all_hosts)
+
+        assert pending == {"web03", "db01"}
+
+    def test_filter_hosts_for_resume(self):
+        """Test filtering hosts for resume mode."""
+        from ftl2.state import ExecutionState, HostState, filter_hosts_for_resume
+
+        state = ExecutionState(
+            module="ping",
+            hosts={
+                "web01": HostState("web01", success=True),
+                "web02": HostState("web02", success=True),
+                "db01": HostState("db01", success=False),
+            },
+        )
+
+        all_hosts = {"web01", "web02", "db01", "db02"}
+        to_run, skipped, new = filter_hosts_for_resume(all_hosts, state)
+
+        # Should skip succeeded hosts
+        assert skipped == {"web01", "web02"}
+        # Should run failed and new hosts
+        assert to_run == {"db01", "db02"}
+        # New hosts
+        assert new == {"db02"}
+
+    def test_save_and_load_state(self):
+        """Test saving and loading state to/from file."""
+        import tempfile
+        from pathlib import Path
+        from ftl2.state import ExecutionState, HostState, save_state, load_state
+
+        state = ExecutionState(
+            module="copy",
+            args={"src": "app.tgz", "dest": "/opt/"},
+            inventory_file="hosts.yml",
+            timestamp="2026-02-05T12:00:00Z",
+            completed=True,
+            hosts={
+                "web01": HostState("web01", success=True, changed=True),
+            },
+            total_hosts=1,
+            successful=1,
+            failed=0,
+        )
+
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+            state_path = Path(f.name)
+
+        try:
+            save_state(state, state_path)
+            assert state_path.exists()
+
+            loaded = load_state(state_path)
+            assert loaded is not None
+            assert loaded.module == "copy"
+            assert loaded.hosts["web01"].success is True
+        finally:
+            state_path.unlink()
+
+    def test_load_nonexistent_state(self):
+        """Test loading state from nonexistent file returns None."""
+        from ftl2.state import load_state
+
+        result = load_state("/tmp/nonexistent-state-file-12345.json")
+        assert result is None
+
+    def test_run_help_shows_state_options(self):
+        """Test that run help shows state tracking options."""
+        runner = CliRunner()
+        result = runner.invoke(cli, ["run", "--help"])
+
+        assert result.exit_code == 0
+        assert "--state-file" in result.output
+        assert "--resume" in result.output
+        assert "State tracking" in result.output
