@@ -29,6 +29,15 @@ from ftl2.ftl_modules.http import ftl_uri, ftl_get_url
 from ftl2.ftl_modules.command import ftl_command, ftl_shell
 from ftl2.ftl_modules.pip import ftl_pip
 from ftl2.ftl_modules.aws import ftl_ec2_instance
+from ftl2.ftl_modules.executor import (
+    execute,
+    execute_on_hosts,
+    execute_batch,
+    run,
+    run_on,
+    ExecuteResult,
+    LocalHost,
+)
 
 # Type for module functions
 ModuleFunc = Callable[..., dict[str, Any]]
@@ -123,6 +132,14 @@ __all__ = [
     "has_ftl_module",
     "list_modules",
     "list_ansible_compat",
+    # Executor
+    "execute",
+    "execute_on_hosts",
+    "execute_batch",
+    "run",
+    "run_on",
+    "ExecuteResult",
+    "LocalHost",
     # File modules
     "ftl_file",
     "ftl_copy",
