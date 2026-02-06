@@ -2,16 +2,18 @@
 
 This module provides the core orchestration logic for running modules
 across inventories of hosts with concurrent execution, chunking for
-optimal performance, result aggregation, and retry logic.
+optimal performance, result aggregation, retry logic, and progress reporting.
 """
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
 from .exceptions import FTL2Error, ErrorTypes
 from .inventory import Inventory
+from .progress import ProgressReporter, NullProgressReporter
 from .retry import (
     RetryConfig,
     CircuitBreakerConfig,
@@ -70,13 +72,14 @@ class ModuleExecutor:
     """Orchestrates module execution across inventories of hosts.
 
     Manages concurrent execution with chunking, result aggregation,
-    retry logic, and proper cleanup of resources.
+    retry logic, progress reporting, and proper cleanup of resources.
 
     Attributes:
         runner_factory: Factory for creating module runners
         chunk_size: Number of hosts to process concurrently
         retry_config: Configuration for retry behavior
         circuit_breaker_config: Configuration for circuit breaker
+        progress_reporter: Reporter for progress events
 
     Example:
         >>> executor = ModuleExecutor()
@@ -93,6 +96,7 @@ class ModuleExecutor:
         chunk_size: int = 10,
         retry_config: RetryConfig | None = None,
         circuit_breaker_config: CircuitBreakerConfig | None = None,
+        progress_reporter: ProgressReporter | None = None,
     ) -> None:
         """Initialize the executor.
 
@@ -100,11 +104,13 @@ class ModuleExecutor:
             chunk_size: Number of hosts to process concurrently (default: 10)
             retry_config: Configuration for retry behavior
             circuit_breaker_config: Configuration for circuit breaker
+            progress_reporter: Reporter for progress events
         """
         self.runner_factory = ModuleRunnerFactory()
         self.chunk_size = chunk_size
         self.retry_config = retry_config or RetryConfig()
         self.circuit_breaker_config = circuit_breaker_config or CircuitBreakerConfig()
+        self.progress_reporter = progress_reporter or NullProgressReporter()
 
     async def run(
         self,
@@ -113,8 +119,9 @@ class ModuleExecutor:
     ) -> ExecutionResults:
         """Execute a module across all hosts in the inventory.
 
-        Supports automatic retries for failed hosts and circuit breaker
-        protection to stop execution if too many hosts are failing.
+        Supports automatic retries for failed hosts, circuit breaker
+        protection to stop execution if too many hosts are failing,
+        and progress reporting.
 
         Args:
             inventory: Inventory of hosts to execute against
@@ -132,6 +139,11 @@ class ModuleExecutor:
         hosts = inventory.get_all_hosts()
         all_results: dict[str, ModuleResult] = {}
         retry_stats = RetryStats(total_hosts=len(hosts))
+        start_time = time.time()
+
+        # Report execution start
+        module_name = context.execution_config.module_name
+        self.progress_reporter.on_execution_start(len(hosts), module_name)
 
         # Process hosts in chunks for optimal performance
         for host_chunk in chunk(list(hosts.values()), self.chunk_size):
@@ -170,6 +182,15 @@ class ModuleExecutor:
         results = ExecutionResults(results=all_results)
         if self.retry_config.max_attempts > 0:
             results.retry_stats = retry_stats
+
+        # Report execution complete
+        duration = time.time() - start_time
+        self.progress_reporter.on_execution_complete(
+            total=results.total_hosts,
+            successful=results.successful,
+            failed=results.failed,
+            duration=duration,
+        )
 
         return results
 
@@ -239,6 +260,18 @@ class ModuleExecutor:
             if pending_hosts and attempt < max_attempts:
                 delay = self.retry_config.get_delay(attempt)
                 logger.info(f"Waiting {delay:.1f}s before retry attempt {attempt + 1}")
+
+                # Report retry events for each host
+                for host in pending_hosts:
+                    state = states[host.name]
+                    self.progress_reporter.on_host_retry(
+                        host=host.name,
+                        attempt=attempt,
+                        max_attempts=max_attempts,
+                        error=state.last_error_message or "Unknown error",
+                        delay=delay,
+                    )
+
                 await asyncio.sleep(delay)
 
         return results, states
@@ -257,25 +290,39 @@ class ModuleExecutor:
         Returns:
             Dictionary mapping host names to results
         """
-        tasks: list[tuple[str, asyncio.Task[ModuleResult]]] = []
+        tasks: list[tuple[str, float, asyncio.Task[ModuleResult]]] = []
 
         for host in hosts:
+            # Report host start
+            self.progress_reporter.on_host_start(host.name)
+
             # Get appropriate runner (local or remote)
             runner = self.runner_factory.create_runner(host)
 
-            # Create task for this host
+            # Create task for this host with start time
+            start_time = time.time()
             task = asyncio.create_task(runner.run(host, context))
-            tasks.append((host.name, task))
+            tasks.append((host.name, start_time, task))
 
         # Wait for all tasks to complete
-        await asyncio.gather(*[task for _, task in tasks], return_exceptions=True)
+        await asyncio.gather(*[task for _, _, task in tasks], return_exceptions=True)
 
-        # Extract results
+        # Extract results and report completion
         results: dict[str, ModuleResult] = {}
-        for host_name, task in tasks:
+        for host_name, start_time, task in tasks:
+            duration = time.time() - start_time
             try:
                 result = task.result()
                 results[host_name] = result
+
+                # Report host complete
+                self.progress_reporter.on_host_complete(
+                    host=host_name,
+                    success=result.success,
+                    changed=result.changed,
+                    duration=duration,
+                    error=result.error,
+                )
             except FTL2Error as e:
                 # Capture rich error context from FTL2 exceptions
                 logger.error(f"Execution failed on {host_name}: {e}")
@@ -287,6 +334,13 @@ class ModuleExecutor:
                     error=str(e),
                     error_context=e.context,
                 )
+                self.progress_reporter.on_host_complete(
+                    host=host_name,
+                    success=False,
+                    changed=False,
+                    duration=duration,
+                    error=str(e),
+                )
             except Exception as e:
                 # Convert other exceptions to error result
                 logger.exception(f"Execution failed on {host_name}: {e}")
@@ -295,6 +349,13 @@ class ModuleExecutor:
                     success=False,
                     changed=False,
                     output={},
+                    error=str(e),
+                )
+                self.progress_reporter.on_host_complete(
+                    host=host_name,
+                    success=False,
+                    changed=False,
+                    duration=duration,
                     error=str(e),
                 )
 

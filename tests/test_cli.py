@@ -1437,6 +1437,124 @@ class TestEnhancedLogging:
         assert "-vv" in result.output or "debug" in result.output.lower()
 
 
+class TestProgressReporting:
+    """Test progress reporting functionality."""
+
+    def test_text_progress_reporter(self):
+        """Test text progress reporter output."""
+        from io import StringIO
+        from ftl2.progress import TextProgressReporter
+
+        output = StringIO()
+        reporter = TextProgressReporter(output=output)
+
+        reporter.on_execution_start(total_hosts=3, module="ping")
+        reporter.on_host_complete(host="web01", success=True, changed=False, duration=0.5)
+        reporter.on_host_complete(host="web02", success=True, changed=True, duration=0.8)
+        reporter.on_host_complete(host="db01", success=False, changed=False, duration=1.0, error="Connection timeout")
+        reporter.on_execution_complete(total=3, successful=2, failed=1, duration=2.3)
+
+        text = output.getvalue()
+        assert "ping" in text
+        assert "3 host" in text
+        assert "web01" in text
+        assert "web02" in text
+        assert "(changed)" in text
+        assert "db01" in text
+        assert "FAILED" in text
+        assert "2/3 succeeded" in text
+
+    def test_json_progress_reporter(self):
+        """Test JSON progress reporter output."""
+        import json
+        from io import StringIO
+        from ftl2.progress import JsonProgressReporter
+
+        output = StringIO()
+        reporter = JsonProgressReporter(output=output)
+
+        reporter.on_execution_start(total_hosts=2, module="setup")
+        reporter.on_host_complete(host="web01", success=True, changed=False, duration=1.0)
+        reporter.on_execution_complete(total=2, successful=2, failed=0, duration=2.0)
+
+        lines = output.getvalue().strip().split("\n")
+        assert len(lines) == 3
+
+        # Parse each line as JSON
+        events = [json.loads(line) for line in lines]
+
+        assert events[0]["event"] == "execution_start"
+        assert events[0]["total_hosts"] == 2
+
+        assert events[1]["event"] == "host_complete"
+        assert events[1]["host"] == "web01"
+        assert events[1]["success"] is True
+
+        assert events[2]["event"] == "execution_complete"
+        assert events[2]["successful"] == 2
+
+    def test_null_progress_reporter(self):
+        """Test null progress reporter does nothing."""
+        from ftl2.progress import NullProgressReporter
+
+        reporter = NullProgressReporter()
+        # These should not raise any errors
+        reporter.on_execution_start(total_hosts=10, module="ping")
+        reporter.on_host_start(host="web01")
+        reporter.on_host_complete(host="web01", success=True, changed=False, duration=1.0)
+        reporter.on_host_retry(host="web01", attempt=1, max_attempts=3, error="Timeout", delay=5.0)
+        reporter.on_execution_complete(total=10, successful=10, failed=0, duration=5.0)
+
+    def test_create_progress_reporter_disabled(self):
+        """Test creating a disabled progress reporter."""
+        from ftl2.progress import create_progress_reporter, NullProgressReporter
+
+        reporter = create_progress_reporter(enabled=False)
+        assert isinstance(reporter, NullProgressReporter)
+
+    def test_create_progress_reporter_text(self):
+        """Test creating a text progress reporter."""
+        from ftl2.progress import create_progress_reporter, TextProgressReporter
+
+        reporter = create_progress_reporter(enabled=True, json_format=False)
+        assert isinstance(reporter, TextProgressReporter)
+
+    def test_create_progress_reporter_json(self):
+        """Test creating a JSON progress reporter."""
+        from ftl2.progress import create_progress_reporter, JsonProgressReporter
+
+        reporter = create_progress_reporter(enabled=True, json_format=True)
+        assert isinstance(reporter, JsonProgressReporter)
+
+    def test_progress_event_to_json(self):
+        """Test progress event JSON serialization."""
+        import json
+        from ftl2.progress import ProgressEvent
+
+        event = ProgressEvent(
+            event_type="host_complete",
+            host="web01",
+            timestamp="2026-02-05T12:00:00Z",
+            details={"success": True, "duration": 1.5},
+        )
+
+        json_str = event.to_json()
+        parsed = json.loads(json_str)
+
+        assert parsed["event"] == "host_complete"
+        assert parsed["host"] == "web01"
+        assert parsed["success"] is True
+        assert parsed["duration"] == 1.5
+
+    def test_run_help_shows_progress_option(self):
+        """Test that run help shows progress option."""
+        runner = CliRunner()
+        result = runner.invoke(cli, ["run", "--help"])
+
+        assert result.exit_code == 0
+        assert "--progress" in result.output
+
+
 class TestExplainMode:
     """Test explain mode functionality."""
 

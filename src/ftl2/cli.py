@@ -49,6 +49,7 @@ from ftl2.state import (
     create_state_from_results,
     filter_hosts_for_resume,
 )
+from ftl2.progress import create_progress_reporter
 from ftl2.runners import ExecutionContext
 from ftl2.types import ExecutionConfig, GateConfig, ModuleResult
 
@@ -979,6 +980,8 @@ def validate_execution_requirements(inventory, module_name: str, module_dirs: li
               help="Increase verbosity: -v=info, -vv=debug, -vvv=trace")
 @click.option("--explain", is_flag=True,
               help="Show execution plan without running anything")
+@click.option("--progress", is_flag=True,
+              help="Show real-time progress as hosts complete")
 def run_module(
     module: str,
     module_dir: tuple[str, ...],
@@ -1000,6 +1003,7 @@ def run_module(
     log_level: Optional[str],
     verbose: int,
     explain: bool,
+    progress: bool,
 ) -> None:
     """Execute a module across inventory hosts.
 
@@ -1031,6 +1035,7 @@ def run_module(
     Preview options:
     - --dry-run: Show what modules would do without executing
     - --explain: Show step-by-step execution plan
+    - --progress: Show real-time progress as hosts complete
 
     Examples:
         ftl2 run -m ping -i hosts.yml
@@ -1052,6 +1057,10 @@ def run_module(
         ftl2 run -m ping -i hosts.yml --explain
 
         ftl2 run -m setup -i hosts.yml --explain --format json
+
+        ftl2 run -m ping -i hosts.yml --progress
+
+        ftl2 run -m setup -i hosts.yml --progress --format json
 
         ftl2 run -m shell -i hosts.yml -a "cmd='rm -rf /old'" --allow-destructive
 
@@ -1268,11 +1277,18 @@ def run_module(
                 threshold_percent=circuit_breaker,
             )
 
+            # Create progress reporter
+            progress_reporter = create_progress_reporter(
+                enabled=progress,
+                json_format=(output_format == "json"),
+            )
+
             # Create executor and run (parallel controls concurrent connections)
             executor = ModuleExecutor(
                 chunk_size=parallel,
                 retry_config=retry_cfg,
                 circuit_breaker_config=cb_cfg,
+                progress_reporter=progress_reporter,
             )
             try:
                 with logger.scope("Module execution"):
