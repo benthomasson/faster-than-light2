@@ -2,6 +2,15 @@
 
 This directory demonstrates FTL modules - in-process Python functions that are 250x+ faster than traditional Ansible module execution.
 
+## Examples Overview
+
+| Example | Description |
+|---------|-------------|
+| `example_local.py` | FTL modules running locally |
+| `example_remote.py` | SSH remote execution with async transport |
+| `example_comparison.py` | Performance comparison (FTL vs subprocess) |
+| `example_ansible_modules.py` | Ansible builtin modules via module_loading |
+
 ## Quick Start
 
 ```bash
@@ -35,8 +44,18 @@ Demonstrates remote execution via async SSH:
 ### 3. Comparison (`example_comparison.py`)
 
 Side-by-side comparison of:
-- FTL modules vs Ansible modules (via module_loading)
-- Performance timing for each approach
+- FTL modules vs pure Python performance
+- Batch vs sequential execution timing
+
+### 4. Ansible Modules (`example_ansible_modules.py`)
+
+Demonstrates the module_loading system:
+- FQCN resolution (`ansible.builtin.command` -> file path)
+- Bundle building (ZIP with module + dependencies)
+- Local and remote Ansible module execution
+- Performance comparison with FTL modules
+
+**Note:** Requires `ftl_builtin_modules` and `ftl_module_utils` installed.
 
 ## FTL Module API
 
