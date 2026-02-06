@@ -210,13 +210,8 @@ class TestModuleStubs:
         """Test ftl_ec2_instance function exists."""
         assert callable(ftl_ec2_instance)
 
-    def test_stubs_raise_not_implemented(self):
-        """Test that stubs raise NotImplementedError."""
+    @pytest.mark.asyncio
+    async def test_aws_stubs_raise_not_implemented(self):
+        """Test that AWS stubs (Phase 4) still raise NotImplementedError."""
         with pytest.raises(NotImplementedError):
-            ftl_file(path="/tmp/test")
-
-        with pytest.raises(NotImplementedError):
-            ftl_copy(src="/tmp/a", dest="/tmp/b")
-
-        with pytest.raises(NotImplementedError):
-            ftl_command(cmd="echo hello")
+            await ftl_ec2_instance(instance_id="i-123")
