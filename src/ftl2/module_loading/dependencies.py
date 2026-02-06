@@ -78,9 +78,28 @@ class ModuleUtilsFinder(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
-        """Handle 'from X import Y' statements."""
+        """Handle 'from X import Y' statements.
+
+        When we see 'from ansible.module_utils.X import _a, _b, _c',
+        we also add each imported name as a potential submodule if it starts
+        with underscore. This handles:
+            from ansible.module_utils._internal import _traceback, _errors
+        which means we need ansible.module_utils._internal._traceback, etc.
+
+        We only do this for names starting with underscore because:
+        - Private submodules commonly use underscore prefix
+        - Names like 'AnsibleModule' or 'fetch_url' are classes/functions
+        """
         if node.module and "module_utils" in node.module:
+            # Add the base module
             self.imports.append(ModuleUtilsImport(node.module))
+
+            # Also add imported names that start with underscore (private submodules)
+            for alias in node.names:
+                name = alias.name
+                if name.startswith("_") and name != "*":
+                    submodule_path = f"{node.module}.{name}"
+                    self.imports.append(ModuleUtilsImport(submodule_path))
         self.generic_visit(node)
 
 
