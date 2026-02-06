@@ -1241,3 +1241,138 @@ class TestPrintErrors:
 
         captured = capsys.readouterr()
         assert "ERRORS" not in captured.out
+
+
+class TestPrintSummary:
+    """Tests for automatic per-host summary printing."""
+
+    def test_print_summary_defaults_true(self):
+        """Test that print_summary defaults to True."""
+        context = AutomationContext()
+        assert context._print_summary is True
+
+    def test_print_summary_can_be_disabled(self):
+        """Test that print_summary can be set to False."""
+        context = AutomationContext(print_summary=False)
+        assert context._print_summary is False
+
+    @pytest.mark.asyncio
+    async def test_print_summary_via_automation_function(self):
+        """Test print_summary parameter in automation() function."""
+        async with automation(print_summary=False) as ftl:
+            assert ftl._print_summary is False
+
+    @pytest.mark.asyncio
+    async def test_summary_printed_on_exit(self, capsys):
+        """Test that summary is printed on context exit when print_summary=True."""
+        from ftl2.ftl_modules import ExecuteResult
+
+        context = AutomationContext(print_summary=True, print_errors=False)
+        context._results.append(ExecuteResult(
+            success=True, changed=True, output={},
+            module="file", host="localhost",
+        ))
+        context._results.append(ExecuteResult(
+            success=True, changed=False, output={},
+            module="command", host="localhost",
+        ))
+
+        await context.__aexit__(None, None, None)
+
+        captured = capsys.readouterr()
+        assert "SUMMARY:" in captured.out
+        assert "localhost: 2 tasks (1 changed, 1 ok)" in captured.out
+
+    @pytest.mark.asyncio
+    async def test_summary_multiple_hosts(self, capsys):
+        """Test summary with multiple hosts."""
+        from ftl2.ftl_modules import ExecuteResult
+
+        context = AutomationContext(print_summary=True, print_errors=False)
+        context._results.append(ExecuteResult(
+            success=True, changed=True, output={},
+            module="file", host="localhost",
+        ))
+        context._results.append(ExecuteResult(
+            success=True, changed=True, output={},
+            module="file", host="web01",
+        ))
+        context._results.append(ExecuteResult(
+            success=False, changed=False, output={},
+            error="Failed", module="service", host="web01",
+        ))
+
+        await context.__aexit__(None, None, None)
+
+        captured = capsys.readouterr()
+        assert "SUMMARY:" in captured.out
+        assert "localhost: 1 tasks (1 changed)" in captured.out
+        assert "web01: 2 tasks (1 changed, 1 failed)" in captured.out
+
+    @pytest.mark.asyncio
+    async def test_no_summary_when_no_results(self, capsys):
+        """Test no summary when there are no results."""
+        context = AutomationContext(print_summary=True)
+
+        await context.__aexit__(None, None, None)
+
+        captured = capsys.readouterr()
+        assert "SUMMARY:" not in captured.out
+
+    @pytest.mark.asyncio
+    async def test_no_summary_when_disabled(self, capsys):
+        """Test no summary when print_summary=False."""
+        from ftl2.ftl_modules import ExecuteResult
+
+        context = AutomationContext(print_summary=False)
+        context._results.append(ExecuteResult(
+            success=True, changed=True, output={},
+            module="file", host="localhost",
+        ))
+
+        await context.__aexit__(None, None, None)
+
+        captured = capsys.readouterr()
+        assert "SUMMARY:" not in captured.out
+
+    @pytest.mark.asyncio
+    async def test_no_summary_when_quiet_mode(self, capsys):
+        """Test no summary when quiet=True."""
+        from ftl2.ftl_modules import ExecuteResult
+
+        context = AutomationContext(print_summary=True, quiet=True)
+        context._results.append(ExecuteResult(
+            success=True, changed=True, output={},
+            module="file", host="localhost",
+        ))
+
+        await context.__aexit__(None, None, None)
+
+        captured = capsys.readouterr()
+        assert "SUMMARY:" not in captured.out
+
+    @pytest.mark.asyncio
+    async def test_summary_before_errors(self, capsys):
+        """Test that summary is printed before errors."""
+        from ftl2.ftl_modules import ExecuteResult
+
+        context = AutomationContext(print_summary=True, print_errors=True)
+        context._results.append(ExecuteResult(
+            success=True, changed=True, output={},
+            module="file", host="localhost",
+        ))
+        context._results.append(ExecuteResult(
+            success=False, changed=False, output={},
+            error="Permission denied", module="service", host="localhost",
+        ))
+
+        await context.__aexit__(None, None, None)
+
+        captured = capsys.readouterr()
+        # Both should be present
+        assert "SUMMARY:" in captured.out
+        assert "ERRORS" in captured.out
+        # Summary should come before errors
+        summary_pos = captured.out.find("SUMMARY:")
+        errors_pos = captured.out.find("ERRORS")
+        assert summary_pos < errors_pos

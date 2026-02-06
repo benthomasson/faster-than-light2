@@ -245,6 +245,7 @@ class AutomationContext:
         quiet: bool = False,
         on_event: EventCallback | None = None,
         fail_fast: bool = False,
+        print_summary: bool = True,
         print_errors: bool = True,
     ):
         """Initialize the automation context.
@@ -276,6 +277,8 @@ class AutomationContext:
             fail_fast: Stop execution on first error. When True, raises
                 AutomationError on first module failure. Default is False
                 (continue and collect errors).
+            print_summary: Print per-host summary on context exit. Default is True.
+                Shows counts of changed/ok/failed tasks per host.
             print_errors: Print error summary on context exit. Default is True.
                 Set to False if you want to handle errors manually.
         """
@@ -289,6 +292,7 @@ class AutomationContext:
         self.quiet = quiet
         self._on_event = on_event
         self.fail_fast = fail_fast
+        self._print_summary = print_summary
         self._print_errors = print_errors
         self._proxy = ModuleProxy(self)
         self._results: list[ExecuteResult] = []
@@ -749,8 +753,12 @@ class AutomationContext:
         """Exit the async context manager.
 
         Performs cleanup including closing SSH connections and
-        optionally printing error summary.
+        optionally printing summary and errors.
         """
+        # Print summary if enabled and there are results
+        if self._print_summary and self._results and not self.quiet:
+            self._print_host_summary()
+
         # Print errors if enabled and any occurred
         if self._print_errors and self.failed and not self.quiet:
             print(f"\nERRORS ({len(self.errors)}):")
@@ -759,3 +767,33 @@ class AutomationContext:
                 print(f"  {error.module} on {host}: {error.error}")
 
         await self._close_ssh_connections()
+
+    def _print_host_summary(self) -> None:
+        """Print per-host summary of what was done."""
+        from collections import defaultdict
+
+        # Group results by host
+        by_host: dict[str, dict[str, int]] = defaultdict(
+            lambda: {"changed": 0, "ok": 0, "failed": 0}
+        )
+
+        for result in self._results:
+            host = getattr(result, "host", "localhost") or "localhost"
+            if not result.success:
+                by_host[host]["failed"] += 1
+            elif result.changed:
+                by_host[host]["changed"] += 1
+            else:
+                by_host[host]["ok"] += 1
+
+        print("\nSUMMARY:")
+        for host, counts in by_host.items():
+            total = counts["changed"] + counts["ok"] + counts["failed"]
+            parts = []
+            if counts["changed"]:
+                parts.append(f"{counts['changed']} changed")
+            if counts["ok"]:
+                parts.append(f"{counts['ok']} ok")
+            if counts["failed"]:
+                parts.append(f"{counts['failed']} failed")
+            print(f"  {host}: {total} tasks ({', '.join(parts)})")
