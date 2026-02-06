@@ -14,6 +14,7 @@ from typing import Iterator
 from ftl2.module_loading.fqcn import (
     get_collection_paths,
     find_ansible_builtin_path,
+    find_ansible_module_utils_path,
 )
 
 logger = logging.getLogger(__name__)
@@ -139,14 +140,8 @@ def resolve_core_module_util(module_path: str) -> Path | None:
     Returns:
         Path to the module_utils file, or None if not found
     """
-    builtin_path = find_ansible_builtin_path()
-    if builtin_path is None:
-        return None
-
-    # module_utils is sibling to modules
-    # ansible/modules -> ansible/module_utils
-    module_utils_base = builtin_path.parent / "module_utils"
-    if not module_utils_base.exists():
+    module_utils_base = find_ansible_module_utils_path()
+    if module_utils_base is None:
         return None
 
     # Convert dotted path to file path
@@ -163,9 +158,9 @@ def resolve_core_module_util(module_path: str) -> Path | None:
         return module_file
 
     # Try direct path
-    direct_path = module_utils_base / "/".join(parts) + ".py"
-    if Path(str(direct_path)).exists():
-        return Path(str(direct_path))
+    direct_path = module_utils_base / f"{'/'.join(parts)}.py"
+    if direct_path.exists():
+        return direct_path
 
     return None
 

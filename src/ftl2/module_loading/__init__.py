@@ -9,6 +9,7 @@ from ftl2.module_loading.fqcn import (
     get_collection_paths,
     resolve_fqcn,
     find_ansible_builtin_path,
+    find_ansible_module_utils_path,
 )
 from ftl2.module_loading.dependencies import (
     find_module_utils_imports,
@@ -45,6 +46,7 @@ __all__ = [
     "get_collection_paths",
     "resolve_fqcn",
     "find_ansible_builtin_path",
+    "find_ansible_module_utils_path",
     # Dependency detection
     "find_module_utils_imports",
     "find_module_utils_imports_from_file",

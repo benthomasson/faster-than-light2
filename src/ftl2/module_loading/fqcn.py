@@ -23,6 +23,7 @@ DEFAULT_COLLECTION_PATHS = [
 
 # Cache for ansible core modules path
 _ansible_builtin_path_cache: Path | None = None
+_ansible_module_utils_path_cache: Path | None = None
 
 
 class ParsedFQCN(NamedTuple):
@@ -206,6 +207,63 @@ def find_ansible_builtin_path() -> Path | None:
     for location in common_locations:
         if location.exists():
             _ansible_builtin_path_cache = location
+            return location
+
+    return None
+
+
+def find_ansible_module_utils_path() -> Path | None:
+    """Find the path to Ansible core module_utils.
+
+    Searches for Ansible's module_utils installation and returns the path.
+    This is separate from find_ansible_builtin_path() because module_utils
+    may be installed in a different package.
+
+    Returns:
+        Path to ansible module_utils directory, or None if not found
+    """
+    global _ansible_module_utils_path_cache
+
+    if _ansible_module_utils_path_cache is not None:
+        return _ansible_module_utils_path_cache
+
+    # Try to find ansible.module_utils package location
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", "from ansible import module_utils; print(module_utils.__file__)"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            module_utils_init = Path(result.stdout.strip())
+            # module_utils/__init__.py -> module_utils/
+            module_utils_path = module_utils_init.parent
+            if module_utils_path.exists():
+                _ansible_module_utils_path_cache = module_utils_path
+                return module_utils_path
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+
+    # Fallback: try to derive from builtin modules path
+    builtin_path = find_ansible_builtin_path()
+    if builtin_path is not None:
+        # ansible/modules -> ansible/module_utils
+        module_utils_path = builtin_path.parent / "module_utils"
+        if module_utils_path.exists():
+            _ansible_module_utils_path_cache = module_utils_path
+            return module_utils_path
+
+    # Try common locations
+    common_locations = [
+        Path(sys.prefix) / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages" / "ansible" / "module_utils",
+        Path.home() / ".local" / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages" / "ansible" / "module_utils",
+        Path("/opt/homebrew/lib") / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages" / "ansible" / "module_utils",
+    ]
+
+    for location in common_locations:
+        if location.exists():
+            _ansible_module_utils_path_cache = location
             return location
 
     return None
