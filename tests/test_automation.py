@@ -1124,3 +1124,120 @@ class TestCheckMode:
         assert context.check_mode is True
         assert context.verbose is True
         assert context._enabled_modules == ["file", "copy"]
+
+
+class TestPrintErrors:
+    """Tests for automatic error printing."""
+
+    def test_print_errors_defaults_true(self):
+        """Test that print_errors defaults to True."""
+        context = AutomationContext()
+        assert context._print_errors is True
+
+    def test_print_errors_can_be_disabled(self):
+        """Test that print_errors can be set to False."""
+        context = AutomationContext(print_errors=False)
+        assert context._print_errors is False
+
+    @pytest.mark.asyncio
+    async def test_print_errors_via_automation_function(self):
+        """Test print_errors parameter in automation() function."""
+        async with automation(print_errors=False) as ftl:
+            assert ftl._print_errors is False
+
+    @pytest.mark.asyncio
+    async def test_errors_printed_on_exit(self, capsys):
+        """Test that errors are printed on context exit when print_errors=True."""
+        from ftl2.ftl_modules import ExecuteResult
+
+        context = AutomationContext(print_errors=True)
+        context._results.append(ExecuteResult(
+            success=False,
+            changed=False,
+            output={},
+            error="Permission denied",
+            module="file",
+            host="localhost",
+        ))
+
+        # Simulate context exit
+        await context.__aexit__(None, None, None)
+
+        captured = capsys.readouterr()
+        assert "ERRORS (1):" in captured.out
+        assert "file on localhost: Permission denied" in captured.out
+
+    @pytest.mark.asyncio
+    async def test_multiple_errors_printed(self, capsys):
+        """Test multiple errors are all printed."""
+        from ftl2.ftl_modules import ExecuteResult
+
+        context = AutomationContext(print_errors=True)
+        context._results.append(ExecuteResult(
+            success=False, changed=False, output={},
+            error="Error 1", module="file", host="localhost",
+        ))
+        context._results.append(ExecuteResult(
+            success=True, changed=True, output={},
+            module="command", host="localhost",
+        ))
+        context._results.append(ExecuteResult(
+            success=False, changed=False, output={},
+            error="Error 2", module="service", host="web01",
+        ))
+
+        await context.__aexit__(None, None, None)
+
+        captured = capsys.readouterr()
+        assert "ERRORS (2):" in captured.out
+        assert "file on localhost: Error 1" in captured.out
+        assert "service on web01: Error 2" in captured.out
+
+    @pytest.mark.asyncio
+    async def test_no_output_when_no_errors(self, capsys):
+        """Test no error output when all modules succeed."""
+        from ftl2.ftl_modules import ExecuteResult
+
+        context = AutomationContext(print_errors=True)
+        context._results.append(ExecuteResult(
+            success=True, changed=True, output={},
+            module="file", host="localhost",
+        ))
+
+        await context.__aexit__(None, None, None)
+
+        captured = capsys.readouterr()
+        assert "ERRORS" not in captured.out
+
+    @pytest.mark.asyncio
+    async def test_no_output_when_print_errors_disabled(self, capsys):
+        """Test no error output when print_errors=False."""
+        from ftl2.ftl_modules import ExecuteResult
+
+        context = AutomationContext(print_errors=False)
+        context._results.append(ExecuteResult(
+            success=False, changed=False, output={},
+            error="Should not print", module="file", host="localhost",
+        ))
+
+        await context.__aexit__(None, None, None)
+
+        captured = capsys.readouterr()
+        assert "ERRORS" not in captured.out
+        assert "Should not print" not in captured.out
+
+    @pytest.mark.asyncio
+    async def test_no_output_when_quiet_mode(self, capsys):
+        """Test no error output when quiet=True even if print_errors=True."""
+        from ftl2.ftl_modules import ExecuteResult
+
+        context = AutomationContext(print_errors=True, quiet=True)
+        context._results.append(ExecuteResult(
+            success=False, changed=False, output={},
+            error="Should not print in quiet mode", module="file", host="localhost",
+        ))
+
+        await context.__aexit__(None, None, None)
+
+        captured = capsys.readouterr()
+        assert "ERRORS" not in captured.out

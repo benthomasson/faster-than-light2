@@ -56,6 +56,7 @@ async def automation(
     quiet: bool = False,
     on_event: EventCallback | None = None,
     fail_fast: bool = False,
+    print_errors: bool = True,
 ) -> AsyncGenerator[AutomationContext, None]:
     """Create an automation context for running FTL modules.
 
@@ -90,6 +91,8 @@ async def automation(
         fail_fast: Stop execution on first error. Raises AutomationError
                   immediately when a module fails. Default is False (continue
                   and collect errors in ftl.errors).
+        print_errors: Print error summary on context exit. Default is True.
+                     Set to False to handle errors manually via ftl.errors.
 
     Yields:
         AutomationContext with ftl.module_name() access to all modules
@@ -185,6 +188,7 @@ async def automation(
         quiet=quiet,
         on_event=on_event,
         fail_fast=fail_fast,
+        print_errors=print_errors,
     )
 
     try:

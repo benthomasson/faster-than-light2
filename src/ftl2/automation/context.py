@@ -245,6 +245,7 @@ class AutomationContext:
         quiet: bool = False,
         on_event: EventCallback | None = None,
         fail_fast: bool = False,
+        print_errors: bool = True,
     ):
         """Initialize the automation context.
 
@@ -275,6 +276,8 @@ class AutomationContext:
             fail_fast: Stop execution on first error. When True, raises
                 AutomationError on first module failure. Default is False
                 (continue and collect errors).
+            print_errors: Print error summary on context exit. Default is True.
+                Set to False if you want to handle errors manually.
         """
         self._enabled_modules = modules
         self._inventory = self._load_inventory(inventory)
@@ -286,6 +289,7 @@ class AutomationContext:
         self.quiet = quiet
         self._on_event = on_event
         self.fail_fast = fail_fast
+        self._print_errors = print_errors
         self._proxy = ModuleProxy(self)
         self._results: list[ExecuteResult] = []
         self._hosts_proxy: HostsProxy | None = None
@@ -744,6 +748,14 @@ class AutomationContext:
     ) -> None:
         """Exit the async context manager.
 
-        Performs cleanup including closing SSH connections.
+        Performs cleanup including closing SSH connections and
+        optionally printing error summary.
         """
+        # Print errors if enabled and any occurred
+        if self._print_errors and self.failed and not self.quiet:
+            print(f"\nERRORS ({len(self.errors)}):")
+            for error in self.errors:
+                host = getattr(error, "host", "localhost") or "localhost"
+                print(f"  {error.module} on {host}: {error.error}")
+
         await self._close_ssh_connections()
