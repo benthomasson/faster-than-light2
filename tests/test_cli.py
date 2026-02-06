@@ -1437,6 +1437,126 @@ class TestEnhancedLogging:
         assert "-vv" in result.output or "debug" in result.output.lower()
 
 
+class TestExplainMode:
+    """Test explain mode functionality."""
+
+    def test_explain_text_output(self):
+        """Test explain mode produces text execution plan."""
+        import tempfile
+        from pathlib import Path
+
+        yaml_content = """
+all:
+  hosts:
+    web01:
+      ansible_host: 192.168.1.10
+      ansible_user: admin
+      ansible_password: secret
+    localhost:
+      ansible_connection: local
+"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
+            f.write(yaml_content)
+            f.flush()
+            inv_path = f.name
+
+        try:
+            runner = CliRunner()
+            result = runner.invoke(cli, [
+                "run", "-m", "ping", "-i", inv_path, "--explain"
+            ])
+
+            assert result.exit_code == 0
+            assert "Execution Plan:" in result.output
+            assert "Load inventory" in result.output
+            assert "Resolve module" in result.output
+            assert "Build gate" in result.output
+            assert "Connect to hosts" in result.output
+            assert "Execute module" in result.output
+            assert "Collect results" in result.output
+            assert "web01" in result.output
+            assert "localhost" in result.output
+            assert "No changes will be made" in result.output
+        finally:
+            Path(inv_path).unlink()
+
+    def test_explain_json_output(self):
+        """Test explain mode produces JSON execution plan."""
+        import tempfile
+        import json
+        from pathlib import Path
+
+        yaml_content = """
+all:
+  hosts:
+    web01:
+      ansible_host: 192.168.1.10
+      ansible_user: admin
+      ansible_password: secret
+"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
+            f.write(yaml_content)
+            f.flush()
+            inv_path = f.name
+
+        try:
+            runner = CliRunner()
+            result = runner.invoke(cli, [
+                "run", "-m", "setup", "-i", inv_path, "--explain", "--format", "json"
+            ])
+
+            assert result.exit_code == 0
+            parsed = json.loads(result.output)
+            assert parsed["explain"] is True
+            assert parsed["module"] == "setup"
+            assert parsed["total_hosts"] == 1
+            assert "steps" in parsed
+            assert len(parsed["steps"]) >= 5
+            assert "hosts" in parsed
+            assert parsed["hosts"][0]["name"] == "web01"
+        finally:
+            Path(inv_path).unlink()
+
+    def test_explain_shows_args(self):
+        """Test explain mode shows module arguments."""
+        import tempfile
+        from pathlib import Path
+
+        yaml_content = """
+all:
+  hosts:
+    localhost:
+      ansible_connection: local
+"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
+            f.write(yaml_content)
+            f.flush()
+            inv_path = f.name
+
+        try:
+            runner = CliRunner()
+            result = runner.invoke(cli, [
+                "run", "-m", "file", "-i", inv_path,
+                "-a", "path=/tmp/test state=touch",
+                "--explain"
+            ])
+
+            assert result.exit_code == 0
+            assert "path=/tmp/test" in result.output
+            assert "state=touch" in result.output
+        finally:
+            Path(inv_path).unlink()
+
+    def test_run_help_shows_explain_option(self):
+        """Test that run help shows explain option."""
+        runner = CliRunner()
+        result = runner.invoke(cli, ["run", "--help"])
+
+        assert result.exit_code == 0
+        assert "--explain" in result.output
+        assert "execution plan" in result.output.lower()
+
+
 class TestIdempotencyParsing:
     """Test idempotency parsing from module docstrings."""
 

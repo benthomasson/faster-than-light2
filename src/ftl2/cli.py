@@ -254,6 +254,191 @@ def format_dry_run_text(
     return "\n".join(lines)
 
 
+def format_explain_text(
+    module: str,
+    inventory_file: str,
+    hosts: dict[str, Any],
+    module_path: Path | None,
+    parallel: int,
+    timeout: int,
+    retry: int,
+    args: dict[str, Any],
+) -> str:
+    """Format execution plan as human-readable text.
+
+    Args:
+        module: Module name
+        inventory_file: Path to inventory file
+        hosts: Dictionary of hosts
+        module_path: Path to module file
+        parallel: Parallel connection limit
+        timeout: Execution timeout
+        retry: Retry count
+        args: Module arguments
+
+    Returns:
+        Formatted execution plan
+    """
+    lines = [
+        "",
+        "Execution Plan:",
+        "=" * 50,
+        "",
+    ]
+
+    # Step 1: Load inventory
+    lines.append(f"  1. Load inventory from {inventory_file}")
+    lines.append(f"     - {len(hosts)} host(s) found")
+    lines.append("")
+
+    # Step 2: Resolve module
+    lines.append(f"  2. Resolve module '{module}'")
+    if module_path:
+        lines.append(f"     - Path: {module_path}")
+    else:
+        lines.append(f"     - Using built-in module")
+    lines.append("")
+
+    # Step 3: Build gate
+    lines.append("  3. Build gate executable")
+    lines.append("     - Package module and dependencies into pyz archive")
+    lines.append("     - Cache for reuse if unchanged")
+    lines.append("")
+
+    # Step 4: Connect
+    local_hosts = [h for h, host in hosts.items() if host.ansible_connection == "local"]
+    ssh_hosts = [h for h, host in hosts.items() if host.ansible_connection == "ssh"]
+
+    lines.append(f"  4. Connect to hosts (parallel: {parallel})")
+    if local_hosts:
+        lines.append(f"     - Local: {len(local_hosts)} host(s)")
+    if ssh_hosts:
+        lines.append(f"     - SSH: {len(ssh_hosts)} host(s)")
+    lines.append("")
+
+    # Step 5: Upload gate
+    if ssh_hosts:
+        lines.append("  5. Upload gate to remote hosts")
+        lines.append("     - Target: /tmp/ftl_gate_<hash>.pyz")
+        lines.append("")
+
+    # Step 6: Execute
+    step_num = 6 if ssh_hosts else 5
+    lines.append(f"  {step_num}. Execute module '{module}' on each host")
+    if args:
+        args_str = ", ".join(f"{k}={v}" for k, v in args.items())
+        lines.append(f"     - Args: {args_str}")
+    lines.append(f"     - Timeout: {timeout}s per host")
+    if retry > 0:
+        lines.append(f"     - Retry: up to {retry} times on failure")
+    lines.append("")
+
+    # Step 7: Collect results
+    step_num += 1
+    lines.append(f"  {step_num}. Collect results and close connections")
+    lines.append("")
+
+    # Host summary
+    lines.append("Hosts:")
+    lines.append("-" * 30)
+    for host_name, host in sorted(hosts.items()):
+        conn = host.ansible_connection
+        if conn == "local":
+            lines.append(f"  - {host_name} (local)")
+        else:
+            addr = host.ansible_host
+            port = host.ansible_port
+            user = host.ansible_user
+            lines.append(f"  - {host_name} ({user}@{addr}:{port})")
+
+    lines.append("")
+    lines.append("This is an explanation only. No changes will be made.")
+    lines.append("")
+
+    return "\n".join(lines)
+
+
+def format_explain_json(
+    module: str,
+    inventory_file: str,
+    hosts: dict[str, Any],
+    module_path: Path | None,
+    parallel: int,
+    timeout: int,
+    retry: int,
+    args: dict[str, Any],
+) -> str:
+    """Format execution plan as JSON.
+
+    Args:
+        module: Module name
+        inventory_file: Path to inventory file
+        hosts: Dictionary of hosts
+        module_path: Path to module file
+        parallel: Parallel connection limit
+        timeout: Execution timeout
+        retry: Retry count
+        args: Module arguments
+
+    Returns:
+        JSON string with execution plan
+    """
+    local_hosts = [h for h in hosts if hosts[h].ansible_connection == "local"]
+    ssh_hosts = [h for h in hosts if hosts[h].ansible_connection == "ssh"]
+
+    steps = [
+        {"step": 1, "action": "load_inventory", "file": inventory_file, "hosts": len(hosts)},
+        {"step": 2, "action": "resolve_module", "module": module, "path": str(module_path) if module_path else None},
+        {"step": 3, "action": "build_gate", "description": "Package module into pyz archive"},
+        {"step": 4, "action": "connect", "parallel": parallel, "local": len(local_hosts), "ssh": len(ssh_hosts)},
+    ]
+
+    step_num = 5
+    if ssh_hosts:
+        steps.append({"step": step_num, "action": "upload_gate", "target": "/tmp/ftl_gate_<hash>.pyz"})
+        step_num += 1
+
+    steps.append({
+        "step": step_num,
+        "action": "execute_module",
+        "module": module,
+        "args": args,
+        "timeout": timeout,
+        "retry": retry,
+    })
+    step_num += 1
+
+    steps.append({"step": step_num, "action": "collect_results"})
+
+    host_details = []
+    for host_name, host in sorted(hosts.items()):
+        detail = {
+            "name": host_name,
+            "connection": host.ansible_connection,
+        }
+        if host.ansible_connection == "ssh":
+            detail["host"] = host.ansible_host
+            detail["port"] = host.ansible_port
+            detail["user"] = host.ansible_user
+        host_details.append(detail)
+
+    output = {
+        "explain": True,
+        "module": module,
+        "inventory_file": inventory_file,
+        "total_hosts": len(hosts),
+        "parallel": parallel,
+        "timeout": timeout,
+        "retry": retry,
+        "args": args,
+        "steps": steps,
+        "hosts": host_details,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+    return json.dumps(output, indent=2)
+
+
 # Main CLI group
 @click.group(invoke_without_command=True)
 @click.option("--version", is_flag=True, help="Show version and exit")
@@ -792,6 +977,8 @@ def validate_execution_requirements(inventory, module_name: str, module_dirs: li
               default=None, help="Set log level explicitly (overrides -v)")
 @click.option("-v", "--verbose", count=True,
               help="Increase verbosity: -v=info, -vv=debug, -vvv=trace")
+@click.option("--explain", is_flag=True,
+              help="Show execution plan without running anything")
 def run_module(
     module: str,
     module_dir: tuple[str, ...],
@@ -812,6 +999,7 @@ def run_module(
     log_file: Optional[str],
     log_level: Optional[str],
     verbose: int,
+    explain: bool,
 ) -> None:
     """Execute a module across inventory hosts.
 
@@ -840,6 +1028,10 @@ def run_module(
     - --log-file FILE: Also write logs to file
     - --log-level LEVEL: Set level explicitly (trace, debug, info, warning, error)
 
+    Preview options:
+    - --dry-run: Show what modules would do without executing
+    - --explain: Show step-by-step execution plan
+
     Examples:
         ftl2 run -m ping -i hosts.yml
 
@@ -856,6 +1048,10 @@ def run_module(
         ftl2 run -m setup -i hosts.yml --log-file /tmp/debug.log --log-level debug
 
         ftl2 run -m file -i hosts.yml -a "path=/tmp/test state=absent" --dry-run
+
+        ftl2 run -m ping -i hosts.yml --explain
+
+        ftl2 run -m setup -i hosts.yml --explain --format json
 
         ftl2 run -m shell -i hosts.yml -a "cmd='rm -rf /old'" --allow-destructive
 
@@ -941,6 +1137,50 @@ def run_module(
     default_module_dir = Path(__file__).parent / "modules"
     if default_module_dir.exists():
         module_dirs.append(default_module_dir)
+
+    # Handle explain mode - show execution plan without running
+    if explain:
+        # Load inventory for explain output
+        try:
+            inv = load_inventory(inventory)
+        except ValueError as e:
+            raise click.ClickException(str(e))
+
+        hosts = inv.get_all_hosts()
+
+        # Find module path
+        module_path = None
+        for mod_dir in module_dirs:
+            candidate = mod_dir / f"{module}.py"
+            if candidate.exists():
+                module_path = candidate
+                break
+
+        parsed_args = parse_module_args(args)
+
+        if output_format == "json":
+            click.echo(format_explain_json(
+                module=module,
+                inventory_file=inventory,
+                hosts=hosts,
+                module_path=module_path,
+                parallel=parallel,
+                timeout=timeout,
+                retry=retry,
+                args=parsed_args,
+            ))
+        else:
+            click.echo(format_explain_text(
+                module=module,
+                inventory_file=inventory,
+                hosts=hosts,
+                module_path=module_path,
+                parallel=parallel,
+                timeout=timeout,
+                retry=retry,
+                args=parsed_args,
+            ))
+        return
 
     async def run_async() -> tuple[ExecutionResults, float]:
         """Inner async function to handle async operations.
