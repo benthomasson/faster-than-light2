@@ -67,8 +67,42 @@ class ModuleUtilsImport:
 class ModuleUtilsFinder(ast.NodeVisitor):
     """AST visitor to find module_utils imports."""
 
-    def __init__(self) -> None:
+    def __init__(self, current_package: str = "") -> None:
+        """Initialize the finder.
+
+        Args:
+            current_package: The package path of the file being parsed,
+                used to resolve relative imports. For example, if parsing
+                ansible/module_utils/basic.py, this would be "ansible.module_utils".
+        """
         self.imports: list[ModuleUtilsImport] = []
+        self.current_package = current_package
+
+    def _resolve_relative_import(self, module: str, level: int) -> str | None:
+        """Resolve a relative import to an absolute module path.
+
+        Args:
+            module: The module name (e.g., "_internal" for "from ._internal import ...")
+            level: The number of dots (1 for ".", 2 for "..", etc.)
+
+        Returns:
+            Absolute module path, or None if cannot resolve
+        """
+        if not self.current_package:
+            return None
+
+        parts = self.current_package.split(".")
+
+        # Go up 'level - 1' directories (level=1 means current package)
+        if level > len(parts):
+            return None
+
+        base_parts = parts[: len(parts) - level + 1]
+        base = ".".join(base_parts)
+
+        if module:
+            return f"{base}.{module}"
+        return base
 
     def visit_Import(self, node: ast.Import) -> None:
         """Handle 'import X' statements."""
@@ -80,34 +114,59 @@ class ModuleUtilsFinder(ast.NodeVisitor):
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         """Handle 'from X import Y' statements.
 
-        When we see 'from ansible.module_utils.X import _a, _b, _c',
-        we also add each imported name as a potential submodule if it starts
-        with underscore. This handles:
-            from ansible.module_utils._internal import _traceback, _errors
-        which means we need ansible.module_utils._internal._traceback, etc.
+        Handles both absolute and relative imports:
+        - Absolute: from ansible.module_utils.basic import AnsibleModule
+        - Relative: from ._internal import _traceback (within module_utils)
 
-        We only do this for names starting with underscore because:
-        - Private submodules commonly use underscore prefix
-        - Names like 'AnsibleModule' or 'fetch_url' are classes/functions
+        For each imported name, we check if it could be a submodule:
+        - Names starting with underscore are likely private submodules
+        - Names that are lowercase and don't look like classes might be modules
+        - We add them all as potential submodules; resolution will filter out non-existent ones
         """
-        if node.module and "module_utils" in node.module:
-            # Add the base module
-            self.imports.append(ModuleUtilsImport(node.module))
+        module = node.module or ""
+        level = node.level  # 0 for absolute, 1+ for relative
 
-            # Also add imported names that start with underscore (private submodules)
+        # Handle relative imports
+        if level > 0:
+            resolved = self._resolve_relative_import(module, level)
+            if resolved and "module_utils" in resolved:
+                # Add the base module
+                self.imports.append(ModuleUtilsImport(resolved))
+
+                # Add imported names as potential submodules
+                for alias in node.names:
+                    name = alias.name
+                    if name != "*":
+                        # Add as potential submodule - resolution will verify if file exists
+                        submodule_path = f"{resolved}.{name}"
+                        self.imports.append(ModuleUtilsImport(submodule_path))
+
+        # Handle absolute imports
+        elif module and "module_utils" in module:
+            # Add the base module
+            self.imports.append(ModuleUtilsImport(module))
+
+            # Add imported names as potential submodules
             for alias in node.names:
                 name = alias.name
-                if name.startswith("_") and name != "*":
-                    submodule_path = f"{node.module}.{name}"
+                if name != "*":
+                    # Add as potential submodule - resolution will verify if file exists
+                    submodule_path = f"{module}.{name}"
                     self.imports.append(ModuleUtilsImport(submodule_path))
+
         self.generic_visit(node)
 
 
-def find_module_utils_imports(source: str) -> list[ModuleUtilsImport]:
+def find_module_utils_imports(
+    source: str,
+    current_package: str = "",
+) -> list[ModuleUtilsImport]:
     """Find all module_utils imports in Python source code.
 
     Args:
         source: Python source code as string
+        current_package: The package path of the source file, used to
+            resolve relative imports
 
     Returns:
         List of ModuleUtilsImport objects
@@ -127,9 +186,54 @@ def find_module_utils_imports(source: str) -> list[ModuleUtilsImport]:
         logger.warning(f"Failed to parse Python source: {e}")
         return []
 
-    finder = ModuleUtilsFinder()
+    finder = ModuleUtilsFinder(current_package)
     finder.visit(tree)
     return finder.imports
+
+
+def _get_package_from_path(file_path: Path) -> str:
+    """Determine the package path from a file path.
+
+    For files in module_utils, extracts the package path so relative
+    imports can be resolved.
+
+    Args:
+        file_path: Path to a Python file
+
+    Returns:
+        Package path (e.g., "ansible.module_utils" for basic.py)
+    """
+    parts = file_path.parts
+
+    # Look for module_utils in the path
+    try:
+        mu_idx = parts.index("module_utils")
+    except ValueError:
+        return ""
+
+    # Build package path from ansible/ansible_collections to the file's directory
+    # Find the start (ansible or ansible_collections)
+    start_idx = None
+    for i, part in enumerate(parts):
+        if part in ("ansible", "ansible_collections"):
+            start_idx = i
+            break
+
+    if start_idx is None:
+        return ""
+
+    # Build the package path up to and including the file's parent directory
+    # For basic.py in ansible/module_utils/, this gives "ansible.module_utils"
+    # For __init__.py in ansible/module_utils/_internal/, this gives "ansible.module_utils._internal"
+    file_name = file_path.name
+    if file_name == "__init__.py":
+        # Package init file - package is the directory
+        package_parts = parts[start_idx:-1]
+    else:
+        # Regular module - package is the parent directory
+        package_parts = parts[start_idx:-1]
+
+    return ".".join(package_parts)
 
 
 def find_module_utils_imports_from_file(file_path: Path) -> list[ModuleUtilsImport]:
@@ -147,7 +251,8 @@ def find_module_utils_imports_from_file(file_path: Path) -> list[ModuleUtilsImpo
         logger.warning(f"Failed to read {file_path}: {e}")
         return []
 
-    return find_module_utils_imports(source)
+    current_package = _get_package_from_path(file_path)
+    return find_module_utils_imports(source, current_package)
 
 
 def resolve_core_module_util(module_path: str) -> Path | None:

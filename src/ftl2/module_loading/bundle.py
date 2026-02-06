@@ -19,43 +19,44 @@ logger = logging.getLogger(__name__)
 
 # Entry point template for the bundle
 # This makes the ZIP executable via: python bundle.zip
+#
+# Ansible modules read their arguments from AnsibleModule which reads from
+# sys.argv[1] (file path) or stdin. We write the args to a temp file and
+# pass that path as sys.argv[1].
 MAIN_TEMPLATE = '''#!/usr/bin/env python
 """FTL2 module bundle entry point."""
 import sys
 import json
+import tempfile
+import os
 
 # Add bundle to path for imports
 if sys.argv[0].endswith('.zip') or sys.argv[0].endswith('.pyz'):
     sys.path.insert(0, sys.argv[0])
 
-# Import the module
-from ftl2_module import main
-
 if __name__ == "__main__":
+    # Read params from stdin and write to temp file
+    # Ansible modules expect args as a file path in sys.argv[1]
+    input_data = sys.stdin.read()
+
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+        f.write(input_data if input_data else '{"ANSIBLE_MODULE_ARGS": {}}')
+        args_file = f.name
+
     try:
-        # Read params from stdin
-        input_data = sys.stdin.read()
-        if input_data:
-            params = json.loads(input_data)
-            module_args = params.get("ANSIBLE_MODULE_ARGS", {})
-        else:
-            module_args = {}
+        # Set up sys.argv as Ansible expects
+        sys.argv = [sys.argv[0], args_file]
 
-        # Execute module
-        result = main(module_args)
+        # Import and run the module
+        from ftl2_module import main
+        main()
 
-        # Output result
-        if result is not None:
-            print(json.dumps(result))
-
-    except Exception as e:
-        error_result = {
-            "failed": True,
-            "msg": str(e),
-            "exception": type(e).__name__,
-        }
-        print(json.dumps(error_result))
-        sys.exit(1)
+    finally:
+        # Clean up temp file
+        try:
+            os.unlink(args_file)
+        except OSError:
+            pass
 '''
 
 
