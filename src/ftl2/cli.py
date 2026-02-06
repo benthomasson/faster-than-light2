@@ -50,6 +50,15 @@ from ftl2.state import (
     filter_hosts_for_resume,
 )
 from ftl2.progress import create_progress_reporter
+from ftl2.workflow import (
+    Workflow,
+    WorkflowStep,
+    load_workflow,
+    save_workflow,
+    list_workflows,
+    delete_workflow,
+    add_step_to_workflow,
+)
 from ftl2.runners import ExecutionContext
 from ftl2.types import ExecutionConfig, GateConfig, ModuleResult
 
@@ -946,6 +955,99 @@ def validate_execution_requirements(inventory, module_name: str, module_dirs: li
                     )
 
 
+# Workflow subcommand group
+@cli.group()
+def workflow() -> None:
+    """Workflow tracking commands.
+
+    Track and manage multi-step execution workflows.
+    """
+    pass
+
+
+@workflow.command("list")
+@click.option("--format", "-f", "output_format", type=click.Choice(["text", "json"]),
+              default="text", help="Output format")
+def workflow_list(output_format: str) -> None:
+    """List all tracked workflows.
+
+    Examples:
+        ftl2 workflow list
+
+        ftl2 workflow list --format json
+    """
+    workflows = list_workflows()
+
+    if not workflows:
+        click.echo("No workflows found.")
+        return
+
+    if output_format == "json":
+        click.echo(json.dumps({"workflows": workflows}, indent=2))
+    else:
+        click.echo("\nWorkflows:")
+        click.echo("-" * 30)
+        for wf_id in workflows:
+            wf = load_workflow(wf_id)
+            if wf:
+                click.echo(f"  {wf_id} ({len(wf.steps)} steps)")
+            else:
+                click.echo(f"  {wf_id}")
+        click.echo(f"\nTotal: {len(workflows)} workflow(s)")
+        click.echo("")
+
+
+@workflow.command("show")
+@click.argument("workflow_id")
+@click.option("--format", "-f", "output_format", type=click.Choice(["text", "json"]),
+              default="text", help="Output format")
+def workflow_show(workflow_id: str, output_format: str) -> None:
+    """Show workflow details and report.
+
+    Examples:
+        ftl2 workflow show deploy-2026-02-05
+
+        ftl2 workflow show deploy-2026-02-05 --format json
+    """
+    wf = load_workflow(workflow_id)
+
+    if wf is None:
+        raise click.ClickException(f"Workflow not found: {workflow_id}")
+
+    if output_format == "json":
+        click.echo(json.dumps(wf.to_dict(), indent=2))
+    else:
+        click.echo(wf.format_report())
+
+
+@workflow.command("delete")
+@click.argument("workflow_id")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
+def workflow_delete(workflow_id: str, yes: bool) -> None:
+    """Delete a workflow.
+
+    Examples:
+        ftl2 workflow delete deploy-2026-02-05
+
+        ftl2 workflow delete deploy-2026-02-05 -y
+    """
+    wf = load_workflow(workflow_id)
+
+    if wf is None:
+        raise click.ClickException(f"Workflow not found: {workflow_id}")
+
+    if not yes:
+        click.confirm(
+            f"Delete workflow '{workflow_id}' with {len(wf.steps)} step(s)?",
+            abort=True
+        )
+
+    if delete_workflow(workflow_id):
+        click.echo(f"Workflow '{workflow_id}' deleted.")
+    else:
+        raise click.ClickException(f"Failed to delete workflow: {workflow_id}")
+
+
 @cli.command("run")
 @click.option("--module", "-m", required=True, help="Module to execute")
 @click.option("--module-dir", "-M", multiple=True, help="Module directory to search (can specify multiple, searched before built-ins)")
@@ -982,6 +1084,10 @@ def validate_execution_requirements(inventory, module_name: str, module_dirs: li
               help="Show execution plan without running anything")
 @click.option("--progress", is_flag=True,
               help="Show real-time progress as hosts complete")
+@click.option("--workflow-id", type=str, default=None,
+              help="Track this execution as part of a workflow")
+@click.option("--step", type=str, default=None,
+              help="Name/label for this workflow step (requires --workflow-id)")
 def run_module(
     module: str,
     module_dir: tuple[str, ...],
@@ -1004,6 +1110,8 @@ def run_module(
     verbose: int,
     explain: bool,
     progress: bool,
+    workflow_id: Optional[str],
+    step: Optional[str],
 ) -> None:
     """Execute a module across inventory hosts.
 
@@ -1036,6 +1144,10 @@ def run_module(
     - --dry-run: Show what modules would do without executing
     - --explain: Show step-by-step execution plan
     - --progress: Show real-time progress as hosts complete
+
+    Workflow tracking:
+    - --workflow-id ID: Track execution as part of a workflow
+    - --step NAME: Label for this step (defaults to module name)
 
     Examples:
         ftl2 run -m ping -i hosts.yml
@@ -1073,6 +1185,10 @@ def run_module(
         ftl2 run -m copy -i hosts.yml -a "src=app.tgz dest=/opt/" --state-file /tmp/deploy.json
 
         ftl2 run -m copy -i hosts.yml -a "src=app.tgz dest=/opt/" --resume /tmp/deploy.json
+
+        ftl2 run -m setup -i hosts.yml --workflow-id deploy-2026-02-05 --step 1-gather-facts
+
+        ftl2 run -m copy -i hosts.yml --workflow-id deploy-2026-02-05 --step 2-deploy
     """
     # Configure logging
     # Determine log level from options
@@ -1317,6 +1433,28 @@ def run_module(
         save_state(exec_state, state_file)
         if output_format != "json":
             click.echo(f"State saved to {state_file}")
+
+    # Track workflow if workflow-id specified (not for dry-run)
+    if workflow_id and not dry_run and results.results:
+        step_name = step or module  # Default step name to module name
+        failed_hosts = [
+            host for host, result in results.results.items()
+            if not result.success
+        ]
+        workflow_step = WorkflowStep(
+            step_name=step_name,
+            module=module,
+            args=parsed_args,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            duration=duration,
+            total_hosts=results.total_hosts,
+            successful=results.successful,
+            failed=results.failed,
+            failed_hosts=failed_hosts,
+        )
+        workflow = add_step_to_workflow(workflow_id, workflow_step)
+        if output_format != "json":
+            click.echo(f"Workflow step '{step_name}' added to workflow '{workflow_id}'")
 
     # Display results based on format and mode
     if dry_run:

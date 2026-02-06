@@ -1675,6 +1675,173 @@ all:
         assert "execution plan" in result.output.lower()
 
 
+class TestWorkflowTracking:
+    """Test workflow tracking functionality."""
+
+    def test_workflow_step_serialization(self):
+        """Test WorkflowStep serialization."""
+        from ftl2.workflow import WorkflowStep
+
+        step = WorkflowStep(
+            step_name="deploy",
+            module="copy",
+            args={"src": "app.tgz", "dest": "/opt/"},
+            timestamp="2026-02-05T12:00:00Z",
+            duration=5.5,
+            total_hosts=3,
+            successful=2,
+            failed=1,
+            failed_hosts=["db01"],
+        )
+
+        data = step.to_dict()
+        assert data["step_name"] == "deploy"
+        assert data["module"] == "copy"
+        assert data["failed_hosts"] == ["db01"]
+
+        restored = WorkflowStep.from_dict(data)
+        assert restored.step_name == step.step_name
+        assert restored.failed_hosts == step.failed_hosts
+
+    def test_workflow_serialization(self):
+        """Test Workflow serialization."""
+        from ftl2.workflow import Workflow, WorkflowStep
+
+        workflow = Workflow(workflow_id="test-workflow")
+        workflow.add_step(WorkflowStep(
+            step_name="step1",
+            module="ping",
+            total_hosts=5,
+            successful=5,
+            failed=0,
+            duration=1.0,
+        ))
+
+        data = workflow.to_dict()
+        assert data["workflow_id"] == "test-workflow"
+        assert len(data["steps"]) == 1
+        assert data["summary"]["total_steps"] == 1
+
+        restored = Workflow.from_dict(data)
+        assert restored.workflow_id == workflow.workflow_id
+        assert len(restored.steps) == 1
+
+    def test_workflow_save_and_load(self):
+        """Test saving and loading workflows."""
+        import tempfile
+        from pathlib import Path
+        from ftl2.workflow import Workflow, WorkflowStep, save_workflow, load_workflow
+
+        workflow = Workflow(workflow_id="test-save-load")
+        workflow.add_step(WorkflowStep(
+            step_name="test",
+            module="ping",
+            total_hosts=2,
+            successful=2,
+            failed=0,
+            duration=0.5,
+        ))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workflow_dir = Path(tmpdir)
+            path = save_workflow(workflow, workflow_dir)
+            assert path.exists()
+
+            loaded = load_workflow("test-save-load", workflow_dir)
+            assert loaded is not None
+            assert loaded.workflow_id == "test-save-load"
+            assert len(loaded.steps) == 1
+
+    def test_workflow_list_workflows(self):
+        """Test listing workflows."""
+        import tempfile
+        from pathlib import Path
+        from ftl2.workflow import Workflow, save_workflow, list_workflows
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workflow_dir = Path(tmpdir)
+
+            # Empty directory
+            assert list_workflows(workflow_dir) == []
+
+            # Add some workflows
+            save_workflow(Workflow(workflow_id="wf1"), workflow_dir)
+            save_workflow(Workflow(workflow_id="wf2"), workflow_dir)
+
+            workflows = list_workflows(workflow_dir)
+            assert len(workflows) == 2
+            assert "wf1" in workflows
+            assert "wf2" in workflows
+
+    def test_workflow_delete(self):
+        """Test deleting a workflow."""
+        import tempfile
+        from pathlib import Path
+        from ftl2.workflow import Workflow, save_workflow, load_workflow, delete_workflow
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workflow_dir = Path(tmpdir)
+            save_workflow(Workflow(workflow_id="to-delete"), workflow_dir)
+
+            assert load_workflow("to-delete", workflow_dir) is not None
+            assert delete_workflow("to-delete", workflow_dir) is True
+            assert load_workflow("to-delete", workflow_dir) is None
+            assert delete_workflow("to-delete", workflow_dir) is False
+
+    def test_workflow_format_report(self):
+        """Test workflow report formatting."""
+        from ftl2.workflow import Workflow, WorkflowStep
+
+        workflow = Workflow(workflow_id="deploy-2026-02-05")
+        workflow.add_step(WorkflowStep(
+            step_name="1-gather-facts",
+            module="setup",
+            total_hosts=3,
+            successful=3,
+            failed=0,
+            duration=2.5,
+        ))
+        workflow.add_step(WorkflowStep(
+            step_name="2-deploy",
+            module="copy",
+            total_hosts=3,
+            successful=2,
+            failed=1,
+            duration=10.0,
+            failed_hosts=["db01"],
+        ))
+
+        report = workflow.format_report()
+        assert "deploy-2026-02-05" in report
+        assert "1-gather-facts" in report
+        assert "2-deploy" in report
+        assert "db01" in report
+        assert "Total Steps: 2" in report
+
+    def test_cli_workflow_list(self):
+        """Test workflow list command."""
+        runner = CliRunner()
+        result = runner.invoke(cli, ["workflow", "list"])
+        # Should succeed even with no workflows
+        assert result.exit_code == 0
+
+    def test_cli_workflow_show_not_found(self):
+        """Test workflow show command with nonexistent workflow."""
+        runner = CliRunner()
+        result = runner.invoke(cli, ["workflow", "show", "nonexistent"])
+        assert result.exit_code != 0
+        assert "not found" in result.output.lower()
+
+    def test_run_help_shows_workflow_options(self):
+        """Test that run help shows workflow options."""
+        runner = CliRunner()
+        result = runner.invoke(cli, ["run", "--help"])
+
+        assert result.exit_code == 0
+        assert "--workflow-id" in result.output
+        assert "--step" in result.output
+
+
 class TestIdempotencyParsing:
     """Test idempotency parsing from module docstrings."""
 
