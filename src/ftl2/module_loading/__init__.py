@@ -27,6 +27,17 @@ from ftl2.module_loading.bundle import (
     BundleInfo,
     BundleCache,
 )
+from ftl2.module_loading.executor import (
+    ExecutionResult,
+    execute_local,
+    execute_local_fqcn,
+    execute_bundle_local,
+    execute_remote,
+    execute_remote_with_staging,
+    stage_bundle_remote,
+    get_module_utils_pythonpath,
+    ModuleExecutor,
+)
 
 __all__ = [
     # FQCN parsing
@@ -49,4 +60,14 @@ __all__ = [
     "Bundle",
     "BundleInfo",
     "BundleCache",
+    # Execution
+    "ExecutionResult",
+    "execute_local",
+    "execute_local_fqcn",
+    "execute_bundle_local",
+    "execute_remote",
+    "execute_remote_with_staging",
+    "stage_bundle_remote",
+    "get_module_utils_pythonpath",
+    "ModuleExecutor",
 ]
