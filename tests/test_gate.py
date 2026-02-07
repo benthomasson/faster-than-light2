@@ -225,3 +225,231 @@ class TestGateBuilder:
             namelist = zf.namelist()
             assert any("test_module.py" in name for name in namelist)
             assert any("module2.py" in name for name in namelist)
+
+
+# =============================================================================
+# Gate Runtime Tests (module execution in ftl_gate)
+# =============================================================================
+
+import base64
+
+
+class TestModuleTypeDetection:
+    """Tests for module type detection functions."""
+
+    def test_is_binary_module_true(self):
+        """Binary modules contain non-UTF8 bytes."""
+        from ftl2.ftl_gate.__main__ import is_binary_module
+
+        # Invalid UTF-8 sequence (continuation byte without start)
+        binary_content = b"\x80\x81\x82\x83"
+        assert is_binary_module(binary_content) is True
+
+    def test_is_binary_module_false(self):
+        """Text modules decode as UTF-8."""
+        from ftl2.ftl_gate.__main__ import is_binary_module
+
+        text_content = b"#!/usr/bin/python3\nprint('hello')"
+        assert is_binary_module(text_content) is False
+
+    def test_is_new_style_module_true(self):
+        """New-style modules contain AnsibleModule(."""
+        from ftl2.ftl_gate.__main__ import is_new_style_module
+
+        module_content = b"""
+from ansible.module_utils.basic import AnsibleModule
+
+def main():
+    module = AnsibleModule(argument_spec={})
+    module.exit_json(changed=False)
+"""
+        assert is_new_style_module(module_content) is True
+
+    def test_is_new_style_module_false(self):
+        """Old-style modules don't contain AnsibleModule(."""
+        from ftl2.ftl_gate.__main__ import is_new_style_module
+
+        module_content = b"#!/usr/bin/python3\nprint('hello')"
+        assert is_new_style_module(module_content) is False
+
+    def test_is_want_json_module_true(self):
+        """WANT_JSON modules contain the marker."""
+        from ftl2.ftl_gate.__main__ import is_want_json_module
+
+        module_content = b"""#!/usr/bin/python3
+# WANT_JSON
+import json, sys
+with open(sys.argv[1]) as f:
+    args = json.load(f)
+"""
+        assert is_want_json_module(module_content) is True
+
+    def test_is_want_json_module_false(self):
+        """Non-WANT_JSON modules don't have the marker."""
+        from ftl2.ftl_gate.__main__ import is_want_json_module
+
+        module_content = b"#!/usr/bin/python3\nprint('hello')"
+        assert is_want_json_module(module_content) is False
+
+
+class TestCheckOutput:
+    """Tests for async command execution."""
+
+    @pytest.mark.asyncio
+    async def test_check_output_simple(self):
+        """check_output runs simple commands."""
+        from ftl2.ftl_gate.__main__ import check_output
+
+        stdout, stderr = await check_output("echo hello")
+        assert stdout.strip() == b"hello"
+
+    @pytest.mark.asyncio
+    async def test_check_output_with_stdin(self):
+        """check_output can send stdin data."""
+        from ftl2.ftl_gate.__main__ import check_output
+
+        stdout, stderr = await check_output("cat", stdin=b"test input")
+        assert stdout == b"test input"
+
+    @pytest.mark.asyncio
+    async def test_check_output_captures_stderr(self):
+        """check_output captures stderr."""
+        from ftl2.ftl_gate.__main__ import check_output
+
+        stdout, stderr = await check_output("echo error >&2")
+        assert b"error" in stderr
+
+
+class TestGetPythonPath:
+    """Tests for Python path helper."""
+
+    def test_get_python_path_returns_string(self):
+        """get_python_path returns a path-separated string."""
+        from ftl2.ftl_gate.__main__ import get_python_path
+        import os
+
+        path = get_python_path()
+        assert isinstance(path, str)
+        assert os.pathsep in path or len(path) > 0
+
+
+class TestExecuteFTLModule:
+    """Tests for FTL native module execution."""
+
+    @pytest.mark.asyncio
+    async def test_execute_ftl_module_async_main(self):
+        """execute_ftl_module can run async main()."""
+        from ftl2.ftl_gate.__main__ import execute_ftl_module
+        from ftl2.message import GateProtocol
+        from unittest.mock import AsyncMock, MagicMock
+
+        protocol = GateProtocol()
+        protocol.send_message = AsyncMock()
+        writer = MagicMock()
+
+        module_source = b"""
+async def main():
+    return {"changed": True, "msg": "success"}
+"""
+        module_b64 = base64.b64encode(module_source).decode()
+
+        await execute_ftl_module(protocol, writer, "test_module", module_b64, {})
+
+        protocol.send_message.assert_called_once()
+        call_args = protocol.send_message.call_args
+        assert call_args[0][1] == "FTLModuleResult"
+        assert call_args[0][2]["result"]["changed"] is True
+
+    @pytest.mark.asyncio
+    async def test_execute_ftl_module_sync_main(self):
+        """execute_ftl_module can run sync main()."""
+        from ftl2.ftl_gate.__main__ import execute_ftl_module
+        from ftl2.message import GateProtocol
+        from unittest.mock import AsyncMock, MagicMock
+
+        protocol = GateProtocol()
+        protocol.send_message = AsyncMock()
+        writer = MagicMock()
+
+        module_source = b"""
+def main():
+    return {"changed": False, "value": 42}
+"""
+        module_b64 = base64.b64encode(module_source).decode()
+
+        await execute_ftl_module(protocol, writer, "sync_module", module_b64, {})
+
+        protocol.send_message.assert_called_once()
+        call_args = protocol.send_message.call_args
+        assert call_args[0][1] == "FTLModuleResult"
+        assert call_args[0][2]["result"]["value"] == 42
+
+    @pytest.mark.asyncio
+    async def test_execute_ftl_module_with_args(self):
+        """execute_ftl_module passes args to main()."""
+        from ftl2.ftl_gate.__main__ import execute_ftl_module
+        from ftl2.message import GateProtocol
+        from unittest.mock import AsyncMock, MagicMock
+
+        protocol = GateProtocol()
+        protocol.send_message = AsyncMock()
+        writer = MagicMock()
+
+        module_source = b"""
+async def main(args):
+    return {"received": args.get("name")}
+"""
+        module_b64 = base64.b64encode(module_source).decode()
+
+        await execute_ftl_module(
+            protocol, writer, "args_module", module_b64, {"name": "test"}
+        )
+
+        call_args = protocol.send_message.call_args
+        assert call_args[0][2]["result"]["received"] == "test"
+
+    @pytest.mark.asyncio
+    async def test_execute_ftl_module_error(self):
+        """execute_ftl_module sends error on exception."""
+        from ftl2.ftl_gate.__main__ import execute_ftl_module
+        from ftl2.message import GateProtocol
+        from unittest.mock import AsyncMock, MagicMock
+
+        protocol = GateProtocol()
+        protocol.send_message = AsyncMock()
+        writer = MagicMock()
+
+        module_source = b"""
+async def main():
+    raise ValueError("intentional error")
+"""
+        module_b64 = base64.b64encode(module_source).decode()
+
+        await execute_ftl_module(protocol, writer, "error_module", module_b64, {})
+
+        call_args = protocol.send_message.call_args
+        assert call_args[0][1] == "Error"
+        assert "intentional error" in call_args[0][2]["message"]
+
+    @pytest.mark.asyncio
+    async def test_execute_ftl_module_no_main(self):
+        """execute_ftl_module errors if no main()."""
+        from ftl2.ftl_gate.__main__ import execute_ftl_module
+        from ftl2.message import GateProtocol
+        from unittest.mock import AsyncMock, MagicMock
+
+        protocol = GateProtocol()
+        protocol.send_message = AsyncMock()
+        writer = MagicMock()
+
+        module_source = b"""
+def helper():
+    pass
+"""
+        module_b64 = base64.b64encode(module_source).decode()
+
+        await execute_ftl_module(protocol, writer, "no_main_module", module_b64, {})
+
+        call_args = protocol.send_message.call_args
+        assert call_args[0][1] == "Error"
+        assert "no main()" in call_args[0][2]["message"]
