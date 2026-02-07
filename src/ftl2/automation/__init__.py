@@ -68,6 +68,7 @@ async def automation(
     auto_install_deps: bool = False,
     record_deps: bool = False,
     deps_file: str = ".ftl2-deps.txt",
+    state_file: str | None = None,
 ) -> AsyncGenerator[AutomationContext, None]:
     """Create an automation context for running FTL modules.
 
@@ -114,6 +115,10 @@ async def automation(
                     for development to capture all needed packages.
         deps_file: Path to write recorded dependencies. Default is
                   ".ftl2-deps.txt". Only used when record_deps=True.
+        state_file: Path to state file for persistent host/resource tracking.
+                   When enabled, add_host() persists to state file immediately,
+                   and hosts are loaded from state on context enter. Enables
+                   crash recovery and idempotent provisioning. Default is None.
 
     Yields:
         AutomationContext with ftl.module_name() access to all modules
@@ -214,6 +219,7 @@ async def automation(
         auto_install_deps=auto_install_deps,
         record_deps=record_deps,
         deps_file=deps_file,
+        state_file=state_file,
     )
 
     try:

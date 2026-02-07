@@ -9,9 +9,12 @@ import os
 import time
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Sequence, TYPE_CHECKING
 
 from ftl2.automation.proxy import ModuleProxy
+
+if TYPE_CHECKING:
+    from ftl2.state import State
 from ftl2.ftl_modules import list_modules, ExecuteResult
 from ftl2.inventory import Inventory, HostGroup, load_inventory, load_localhost
 from ftl2.types import HostConfig
@@ -250,6 +253,7 @@ class AutomationContext:
         auto_install_deps: bool = False,
         record_deps: bool = False,
         deps_file: str | Path = ".ftl2-deps.txt",
+        state_file: str | Path | None = None,
     ):
         """Initialize the automation context.
 
@@ -292,9 +296,21 @@ class AutomationContext:
                 development, then use the generated file for production builds.
             deps_file: Path to write recorded dependencies. Default is
                 ".ftl2-deps.txt". Only used when record_deps=True.
+            state_file: Path to state file for persisting dynamic hosts and
+                resources. When enabled, add_host() writes to state file
+                immediately, and hosts are loaded from state on context enter.
+                This enables crash recovery and idempotent provisioning.
+                Default is None (no state persistence).
         """
         self._enabled_modules = modules
         self._inventory = self._load_inventory(inventory)
+
+        # Initialize state if state_file provided
+        self._state: "State | None" = None
+        if state_file is not None:
+            from ftl2.state import State, merge_state_into_inventory
+            self._state = State(state_file)
+            merge_state_into_inventory(self._state, self._inventory)
         self._secrets_proxy = SecretsProxy(secrets or [])
         self._secret_bindings = secret_bindings or {}
         self._load_bound_secrets()
@@ -536,6 +552,17 @@ class AutomationContext:
         # Invalidate the hosts proxy cache so it picks up the new host
         self._hosts_proxy = None
 
+        # Persist to state file if enabled
+        if self._state is not None:
+            self._state.add_host(
+                name=hostname,
+                ansible_host=ansible_host,
+                ansible_user=ansible_user,
+                ansible_port=ansible_port,
+                groups=group_names,
+                **vars,
+            )
+
         return host
 
     @property
@@ -557,6 +584,31 @@ class AutomationContext:
             ftl.secrets.loaded_keys()         # List successfully loaded secrets
         """
         return self._secrets_proxy
+
+    @property
+    def state(self) -> "State":
+        """Access the state manager for persistent host/resource tracking.
+
+        State enables crash recovery and idempotent provisioning by
+        persisting dynamically added hosts and resources to a JSON file.
+
+        Returns:
+            State object for has/get/add/remove operations
+
+        Raises:
+            RuntimeError: If state_file was not provided to automation()
+
+        Example:
+            if not ftl.state.has("minecraft-9"):
+                server = await ftl.local.community.general.linode_v4(...)
+                ftl.state.add("minecraft-9", {"provider": "linode", ...})
+                ftl.add_host("minecraft-9", ansible_host=ip)
+        """
+        if self._state is None:
+            raise RuntimeError(
+                "State not available. Enable with: automation(state_file='.ftl2-state.json')"
+            )
+        return self._state
 
     @property
     def available_modules(self) -> list[str]:
