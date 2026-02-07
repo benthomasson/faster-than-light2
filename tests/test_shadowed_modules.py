@@ -210,3 +210,106 @@ class TestPingImplementation:
             # Ping should fail on unreachable host
             with pytest.raises((FTL2ConnectionError, TimeoutError, Exception)):
                 await ftl.unreachable.ping()
+
+
+class TestWaitForSSHGroupResolution:
+    """Tests for Issue 11: wait_for_ssh must use ansible_host from inventory."""
+
+    @pytest.mark.asyncio
+    async def test_wait_for_ssh_uses_ansible_host_for_group(self):
+        """Test that wait_for_ssh uses ansible_host, not group name.
+
+        This is the Issue 11 fix - when targeting a group like "minecraft",
+        wait_for_ssh must resolve to member hosts and use their ansible_host
+        values (IP addresses), not try to connect to "minecraft:22".
+        """
+        import time
+
+        # Create inventory with a group containing a host with ansible_host
+        inventory = {
+            "minecraft": {
+                "hosts": {
+                    "minecraft-9": {
+                        "ansible_host": "192.0.2.1",  # Unreachable TEST-NET IP
+                    }
+                }
+            }
+        }
+
+        async with automation(
+            inventory=inventory,
+            print_summary=False,
+            quiet=True,
+        ) as ftl:
+            start = time.monotonic()
+
+            # Target the GROUP, not the individual host
+            with pytest.raises(TimeoutError) as exc_info:
+                await ftl.minecraft.wait_for_ssh(timeout=2)
+
+            elapsed = time.monotonic() - start
+
+            # Verify the error message contains the IP address, not "minecraft"
+            # This proves wait_for_ssh resolved the group to hosts and looked up ansible_host
+            error_msg = str(exc_info.value)
+            assert "192.0.2.1" in error_msg, f"Expected IP in error, got: {error_msg}"
+            assert "minecraft:22" not in error_msg, f"Should not use group name: {error_msg}"
+            assert elapsed >= 2.0
+
+    @pytest.mark.asyncio
+    async def test_wait_for_ssh_uses_ansible_host_for_host(self):
+        """Test that wait_for_ssh uses ansible_host when targeting individual host."""
+        import time
+
+        inventory = {
+            "servers": {
+                "hosts": {
+                    "web-server": {
+                        "ansible_host": "192.0.2.2",  # Unreachable TEST-NET IP
+                    }
+                }
+            }
+        }
+
+        async with automation(
+            inventory=inventory,
+            print_summary=False,
+            quiet=True,
+        ) as ftl:
+            start = time.monotonic()
+
+            # Target the host directly (underscore→dash normalization)
+            with pytest.raises(TimeoutError) as exc_info:
+                await ftl.web_server.wait_for_ssh(timeout=2)
+
+            elapsed = time.monotonic() - start
+
+            error_msg = str(exc_info.value)
+            assert "192.0.2.2" in error_msg, f"Expected IP in error, got: {error_msg}"
+            assert elapsed >= 2.0
+
+    @pytest.mark.asyncio
+    async def test_wait_for_ssh_waits_for_all_hosts_in_group(self):
+        """Test that wait_for_ssh checks all hosts when targeting a group."""
+        # This test verifies that wait_for_ssh iterates over all group members
+        inventory = {
+            "webservers": {
+                "hosts": {
+                    "web1": {"ansible_host": "192.0.2.10"},
+                    "web2": {"ansible_host": "192.0.2.11"},
+                }
+            }
+        }
+
+        async with automation(
+            inventory=inventory,
+            print_summary=False,
+            quiet=True,
+        ) as ftl:
+            # Target the group - should try to connect to both hosts
+            with pytest.raises(TimeoutError) as exc_info:
+                await ftl.webservers.wait_for_ssh(timeout=2)
+
+            # Error should contain one of the IP addresses
+            error_msg = str(exc_info.value)
+            assert "192.0.2.10" in error_msg or "192.0.2.11" in error_msg

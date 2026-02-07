@@ -91,43 +91,79 @@ class HostScopedProxy:
         if delay > 0:
             await asyncio.sleep(delay)
 
-        # Get host info from inventory
-        # hosts_proxy[host] returns list[HostConfig]
+        # Resolve target to list of hosts (handles both groups and individual hosts)
+        # This is the same pattern used by run_on()
         hosts_proxy = self._context.hosts
-        ansible_host = self._target
-        port = 22
 
-        if self._target in hosts_proxy.keys():
+        try:
+            # Use hosts_proxy[target] which handles both groups and hosts
+            # via __getitem__ (not keys() which only has host names)
             host_configs = hosts_proxy[self._target]
-            if host_configs:
-                # Use the first matching host
-                host_config = host_configs[0]
-                ansible_host = host_config.ansible_host or self._target
-                port = host_config.ansible_port or 22
+        except KeyError:
+            # Target not in inventory, fall back to using target name directly
+            # This handles localhost and other special cases
+            host_configs = []
 
+        if not host_configs:
+            # No hosts found in inventory, use target name directly
+            # This handles localhost, special targets, or unknown hosts
+            ansible_host = self._target
+            port = 22
+
+            start = time.monotonic()
+            last_error = None
+
+            while True:
+                try:
+                    reader, writer = await asyncio.wait_for(
+                        asyncio.open_connection(ansible_host, port),
+                        timeout=connect_timeout,
+                    )
+                    writer.close()
+                    await writer.wait_closed()
+                    elapsed = int(time.monotonic() - start)
+                    return {"elapsed": elapsed, "changed": False}
+                except (OSError, asyncio.TimeoutError) as e:
+                    last_error = e
+                    elapsed = time.monotonic() - start
+                    if elapsed >= timeout:
+                        raise TimeoutError(
+                            f"SSH not available on {ansible_host}:{port} "
+                            f"after {timeout} seconds"
+                        ) from last_error
+                    await asyncio.sleep(sleep)
+
+        # Wait for SSH on all hosts in the target (group or single host)
         start = time.monotonic()
-        last_error = None
 
-        while True:
-            try:
-                # Try TCP connection to SSH port
-                reader, writer = await asyncio.wait_for(
-                    asyncio.open_connection(ansible_host, port),
-                    timeout=connect_timeout,
-                )
-                writer.close()
-                await writer.wait_closed()
-                elapsed = int(time.monotonic() - start)
-                return {"elapsed": elapsed, "changed": False}
-            except (OSError, asyncio.TimeoutError) as e:
-                last_error = e
-                elapsed = time.monotonic() - start
-                if elapsed >= timeout:
-                    raise TimeoutError(
-                        f"SSH not available on {ansible_host}:{port} "
-                        f"after {timeout} seconds"
-                    ) from last_error
-                await asyncio.sleep(sleep)
+        for host_config in host_configs:
+            # Use ansible_host (IP address) if set, otherwise fall back to host name
+            ansible_host = host_config.ansible_host or host_config.name
+            port = host_config.ansible_port or 22
+
+            last_error = None
+
+            while True:
+                try:
+                    reader, writer = await asyncio.wait_for(
+                        asyncio.open_connection(ansible_host, port),
+                        timeout=connect_timeout,
+                    )
+                    writer.close()
+                    await writer.wait_closed()
+                    break  # This host is ready, move to next
+                except (OSError, asyncio.TimeoutError) as e:
+                    last_error = e
+                    elapsed = time.monotonic() - start
+                    if elapsed >= timeout:
+                        raise TimeoutError(
+                            f"SSH not available on {host_config.name} ({ansible_host}:{port}) "
+                            f"after {timeout} seconds"
+                        ) from last_error
+                    await asyncio.sleep(sleep)
+
+        elapsed = int(time.monotonic() - start)
+        return {"elapsed": elapsed, "changed": False}
 
     async def ping(self) -> dict[str, str]:
         """Test FTL2 gate connectivity by executing through the full pipeline.
