@@ -630,6 +630,200 @@ if __name__ == "__main__":
                 host.write_file.assert_called_once()
 
 
+class TestRequirementsChecking:
+    """Tests for requirements checking in executor functions."""
+
+    def test_execute_fqcn_missing_requirements(self):
+        """Test that missing requirements cause execution to fail early."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Create collection structure
+            coll_dir = Path(tmpdir) / "collections" / "ansible_collections" / "test" / "cloud"
+            modules_dir = coll_dir / "plugins" / "modules"
+            modules_dir.mkdir(parents=True)
+
+            module = modules_dir / "needs_deps.py"
+            module.write_text('''
+DOCUMENTATION = """
+---
+module: needs_deps
+short_description: Requires external packages
+requirements:
+  - nonexistent_fake_package_xyz123
+  - another_fake_package_abc456
+"""
+
+import sys
+import json
+
+if __name__ == "__main__":
+    # This should never run if requirements check works
+    params = json.load(sys.stdin)
+    print(json.dumps({"msg": "should not reach here"}))
+''')
+
+            result = execute_local_fqcn(
+                "test.cloud.needs_deps",
+                {},
+                extra_paths=[Path(tmpdir) / "collections"],
+                check_requirements=True,
+            )
+
+            assert result.success is False
+            assert "nonexistent_fake_package_xyz123" in result.error
+            assert "pip install" in result.error
+
+    def test_execute_fqcn_skip_requirements_check(self):
+        """Test that requirements check can be skipped."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Create collection structure
+            coll_dir = Path(tmpdir) / "collections" / "ansible_collections" / "test" / "coll"
+            modules_dir = coll_dir / "plugins" / "modules"
+            modules_dir.mkdir(parents=True)
+
+            module = modules_dir / "no_check.py"
+            module.write_text('''
+DOCUMENTATION = """
+---
+module: no_check
+short_description: Has fake requirements but we skip the check
+requirements:
+  - nonexistent_fake_package_xyz123
+"""
+
+import sys
+import json
+
+if __name__ == "__main__":
+    params = json.load(sys.stdin)
+    args = params.get("ANSIBLE_MODULE_ARGS", {})
+    result = {"msg": "ran without requirements check", "changed": False}
+    print(json.dumps(result))
+''')
+
+            result = execute_local_fqcn(
+                "test.coll.no_check",
+                {},
+                extra_paths=[Path(tmpdir) / "collections"],
+                check_requirements=False,  # Skip the check
+            )
+
+            assert result.success is True
+            assert result.output["msg"] == "ran without requirements check"
+
+    @pytest.mark.asyncio
+    async def test_execute_fqcn_streaming_missing_requirements(self):
+        """Test that streaming execution also checks requirements."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Create collection structure
+            coll_dir = Path(tmpdir) / "collections" / "ansible_collections" / "test" / "cloud"
+            modules_dir = coll_dir / "plugins" / "modules"
+            modules_dir.mkdir(parents=True)
+
+            module = modules_dir / "needs_deps_streaming.py"
+            module.write_text('''
+DOCUMENTATION = """
+---
+module: needs_deps_streaming
+short_description: Requires external packages
+requirements:
+  - nonexistent_streaming_package_xyz
+"""
+
+import sys
+import json
+
+if __name__ == "__main__":
+    params = json.load(sys.stdin)
+    print(json.dumps({"msg": "should not reach here"}))
+''')
+
+            result = await execute_local_fqcn_streaming(
+                "test.cloud.needs_deps_streaming",
+                {},
+                extra_paths=[Path(tmpdir) / "collections"],
+                check_requirements=True,
+            )
+
+            assert result.success is False
+            assert "nonexistent_streaming_package_xyz" in result.error
+            assert "pip install" in result.error
+
+    @pytest.mark.asyncio
+    async def test_execute_fqcn_streaming_skip_requirements_check(self):
+        """Test that streaming can skip requirements check."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Create collection structure
+            coll_dir = Path(tmpdir) / "collections" / "ansible_collections" / "test" / "coll"
+            modules_dir = coll_dir / "plugins" / "modules"
+            modules_dir.mkdir(parents=True)
+
+            module = modules_dir / "stream_no_check.py"
+            module.write_text('''
+DOCUMENTATION = """
+---
+module: stream_no_check
+requirements:
+  - nonexistent_fake_package_xyz123
+"""
+
+import sys
+import json
+
+if __name__ == "__main__":
+    params = json.load(sys.stdin)
+    result = {"msg": "streamed without check", "changed": True}
+    print(json.dumps(result))
+''')
+
+            result = await execute_local_fqcn_streaming(
+                "test.coll.stream_no_check",
+                {},
+                extra_paths=[Path(tmpdir) / "collections"],
+                check_requirements=False,
+            )
+
+            assert result.success is True
+            assert result.output["msg"] == "streamed without check"
+
+    def test_execute_fqcn_all_requirements_satisfied(self):
+        """Test execution proceeds when all requirements are installed."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Create collection structure
+            coll_dir = Path(tmpdir) / "collections" / "ansible_collections" / "test" / "coll"
+            modules_dir = coll_dir / "plugins" / "modules"
+            modules_dir.mkdir(parents=True)
+
+            module = modules_dir / "satisfied_deps.py"
+            module.write_text('''
+DOCUMENTATION = """
+---
+module: satisfied_deps
+short_description: Uses only stdlib packages
+requirements:
+  - json
+  - os
+"""
+
+import sys
+import json
+
+if __name__ == "__main__":
+    params = json.load(sys.stdin)
+    result = {"msg": "all deps satisfied", "changed": False}
+    print(json.dumps(result))
+''')
+
+            result = execute_local_fqcn(
+                "test.coll.satisfied_deps",
+                {},
+                extra_paths=[Path(tmpdir) / "collections"],
+                check_requirements=True,
+            )
+
+            assert result.success is True
+            assert result.output["msg"] == "all deps satisfied"
+
+
 class TestExecuteLocalFqcn:
     """Tests for execute_local_fqcn function."""
 

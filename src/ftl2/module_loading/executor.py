@@ -22,6 +22,10 @@ from ftl2.module_loading.fqcn import (
     find_ansible_builtin_path,
 )
 from ftl2.module_loading.bundle import Bundle, BundleCache
+from ftl2.module_loading.requirements import (
+    check_module_requirements,
+    format_missing_requirements_error,
+)
 from ftl2.events import parse_events, parse_event
 
 logger = logging.getLogger(__name__)
@@ -365,6 +369,7 @@ async def execute_local_fqcn_streaming(
     playbook_dir: Path | None = None,
     extra_paths: list[Path] | None = None,
     event_callback: Callable[[dict[str, Any]], None] | None = None,
+    check_requirements: bool = True,
 ) -> ExecutionResult:
     """Execute a module locally by FQCN with real-time event streaming.
 
@@ -378,6 +383,7 @@ async def execute_local_fqcn_streaming(
         playbook_dir: Optional playbook directory for collection search
         extra_paths: Optional additional collection paths
         event_callback: Called for each event as it's emitted
+        check_requirements: Check Python package requirements before execution
 
     Returns:
         ExecutionResult with output and status
@@ -390,6 +396,17 @@ async def execute_local_fqcn_streaming(
             error=f"Failed to resolve module: {e}",
             return_code=-1,
         )
+
+    # Check for missing Python package requirements
+    if check_requirements:
+        missing = check_module_requirements(module_path)
+        if missing:
+            error_msg = format_missing_requirements_error(fqcn, missing)
+            return ExecutionResult(
+                success=False,
+                error=error_msg,
+                return_code=-1,
+            )
 
     return await execute_local_streaming(
         module_path, params, timeout, check_mode, event_callback
@@ -403,6 +420,7 @@ def execute_local_fqcn(
     check_mode: bool = False,
     playbook_dir: Path | None = None,
     extra_paths: list[Path] | None = None,
+    check_requirements: bool = True,
 ) -> ExecutionResult:
     """Execute a module locally by FQCN.
 
@@ -415,6 +433,7 @@ def execute_local_fqcn(
         check_mode: Whether to run in check mode
         playbook_dir: Optional playbook directory for collection search
         extra_paths: Optional additional collection paths
+        check_requirements: Check Python package requirements before execution
 
     Returns:
         ExecutionResult with output and status
@@ -427,6 +446,17 @@ def execute_local_fqcn(
             error=f"Failed to resolve module: {e}",
             return_code=-1,
         )
+
+    # Check for missing Python package requirements
+    if check_requirements:
+        missing = check_module_requirements(module_path)
+        if missing:
+            error_msg = format_missing_requirements_error(fqcn, missing)
+            return ExecutionResult(
+                success=False,
+                error=error_msg,
+                return_code=-1,
+            )
 
     return execute_local(module_path, params, timeout, check_mode)
 
