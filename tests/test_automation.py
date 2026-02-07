@@ -716,19 +716,18 @@ class TestHostScopedProxy:
         assert proxy._path == "ansible.posix.firewalld"
 
     @pytest.mark.asyncio
-    async def test_host_scoped_proxy_executes_run_on(self):
-        """Test that host-scoped proxy calls run_on."""
+    async def test_host_scoped_proxy_localhost_executes_directly(self):
+        """Test that ftl.localhost executes directly (not via run_on)."""
         with tempfile.TemporaryDirectory() as tmpdir:
             test_file = Path(tmpdir) / "test.txt"
 
             async with automation() as ftl:
-                # Use host-scoped syntax
-                results = await ftl.localhost.file(path=str(test_file), state="touch")
+                # Use host-scoped syntax for localhost
+                result = await ftl.localhost.file(path=str(test_file), state="touch")
 
-                # Should return list of results (like run_on)
-                assert isinstance(results, list)
-                assert len(results) == 1
-                assert results[0].success is True
+                # Should return dict (module output), not list
+                assert isinstance(result, dict)
+                assert result.get("changed") is True
                 assert test_file.exists()
 
     @pytest.mark.asyncio
@@ -774,6 +773,35 @@ class TestHostScopedProxy:
         # 'command' is a module
         command_module = context.command
         assert callable(command_module)
+
+    @pytest.mark.asyncio
+    async def test_local_works_without_inventory(self):
+        """Test ftl.local works even with empty inventory."""
+        async with automation(inventory={"servers": {"hosts": {}}}) as ftl:
+            # ftl.local should work without localhost in inventory
+            result = await ftl.local.command(cmd="echo hello")
+
+            assert isinstance(result, dict)
+            assert "stdout" in result
+
+    @pytest.mark.asyncio
+    async def test_localhost_works_without_inventory(self):
+        """Test ftl.localhost works even with empty inventory."""
+        async with automation(inventory={"servers": {"hosts": {}}}) as ftl:
+            # ftl.localhost should work without localhost in inventory
+            result = await ftl.localhost.command(cmd="echo hello")
+
+            assert isinstance(result, dict)
+            assert "stdout" in result
+
+    @pytest.mark.asyncio
+    async def test_local_fqcn_module(self):
+        """Test ftl.local with FQCN module."""
+        async with automation(inventory={"servers": {"hosts": {}}}) as ftl:
+            # FQCN module via local
+            result = await ftl.local.ansible.builtin.command(cmd="echo fqcn")
+
+            assert isinstance(result, dict)
 
 
 class TestSecretsManagement:

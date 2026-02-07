@@ -96,9 +96,14 @@ class HostScopedModuleProxy:
             **kwargs: Module parameters
 
         Returns:
-            For single host: ExecuteResult
+            For localhost: dict (module output)
+            For single host: list[ExecuteResult]
             For group: list[ExecuteResult]
         """
+        # Special case: local/localhost executes directly without inventory
+        if self._target in ("local", "localhost"):
+            return await self._context.execute(self._path, kwargs)
+
         return await self._context.run_on(self._target, self._path, **kwargs)
 
     def __repr__(self) -> str:
