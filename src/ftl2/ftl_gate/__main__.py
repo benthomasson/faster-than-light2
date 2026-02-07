@@ -145,6 +145,55 @@ def is_zip_bundle(module: bytes) -> bool:
     return module[:4] == b"PK\x03\x04"
 
 
+def detect_module_type(module_bytes: bytes) -> str:
+    """Detect the type of a module from its content.
+
+    Returns:
+        One of: "zip_bundle", "binary", "new_style", "want_json", "old_style"
+    """
+    if is_zip_bundle(module_bytes):
+        return "zip_bundle"
+    if is_binary_module(module_bytes):
+        return "binary"
+    if is_new_style_module(module_bytes):
+        return "new_style"
+    if is_want_json_module(module_bytes):
+        return "want_json"
+    return "old_style"
+
+
+def list_gate_modules() -> list[dict[str, str]]:
+    """List all modules bundled in the gate.
+
+    Returns:
+        List of dicts with 'name' and 'type' for each module.
+    """
+    modules = []
+
+    if not HAS_FTL_GATE:
+        return modules
+
+    import importlib.resources
+
+    try:
+        gate_files = importlib.resources.files(ftl_gate)
+        for item in gate_files.iterdir():
+            name = item.name
+            # Skip __init__.py and __pycache__
+            if name.startswith("__"):
+                continue
+            try:
+                content = item.read_bytes()
+                module_type = detect_module_type(content)
+                modules.append({"name": name, "type": module_type})
+            except Exception:
+                modules.append({"name": name, "type": "unknown"})
+    except Exception:
+        pass
+
+    return modules
+
+
 def get_python_path() -> str:
     """Get the current Python path for subprocess environment setup."""
     return os.pathsep.join(sys.path)
@@ -511,6 +560,28 @@ async def main(args: list[str]) -> int | None:
                     data.get("module_name", ""),
                     data.get("module", ""),
                     data.get("module_args", {}),
+                )
+
+            elif msg_type == "Info":
+                logger.info("Info requested")
+                await protocol.send_message(
+                    writer,
+                    "InfoResult",
+                    {
+                        "python_version": sys.version,
+                        "python_executable": sys.executable,
+                        "gate_location": os.path.abspath(sys.argv[0]) if sys.argv else "",
+                        "platform": sys.platform,
+                        "pid": os.getpid(),
+                        "cwd": os.getcwd(),
+                    },
+                )
+
+            elif msg_type == "ListModules":
+                logger.info("ListModules requested")
+                modules = list_gate_modules()
+                await protocol.send_message(
+                    writer, "ListModulesResult", {"modules": modules}
                 )
 
             elif msg_type == "Shutdown":

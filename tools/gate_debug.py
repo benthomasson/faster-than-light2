@@ -73,7 +73,17 @@ def reader_thread(proc: subprocess.Popen) -> None:
             body = buf[8 : 8 + length].decode("utf-8")
             buf = buf[8 + length :]
             msg_type, data = json.loads(body)
-            print(f"\n<< {msg_type}: {json.dumps(data)}")
+            if msg_type == "InfoResult":
+                print(f"\n<< {msg_type}:")
+                for key, val in data.items():
+                    print(f"   {key:20s} {val}")
+            elif msg_type == "ListModulesResult":
+                modules = data.get("modules", [])
+                print(f"\n<< {msg_type}: {len(modules)} module(s)")
+                for m in modules:
+                    print(f"   {m['name']:30s} {m['type']}")
+            else:
+                print(f"\n<< {msg_type}: {json.dumps(data)}")
             print("gate> ", end="", flush=True)
 
 
@@ -84,7 +94,7 @@ def main() -> None:
 
     gate_path = sys.argv[1]
     print(f"Launching gate: {gate_path}")
-    print("Commands: hello, shutdown, module <name> [args_json], raw <json>, quit")
+    print("Commands: hello, info, list, shutdown, module <name> [args_json], raw <json>, quit")
     print()
 
     proc = subprocess.Popen(
@@ -113,6 +123,16 @@ def main() -> None:
 
             if cmd == "hello":
                 msg = encode_message("Hello", {})
+                proc.stdin.write(msg)
+                proc.stdin.flush()
+
+            elif cmd == "info":
+                msg = encode_message("Info", {})
+                proc.stdin.write(msg)
+                proc.stdin.flush()
+
+            elif cmd == "list":
+                msg = encode_message("ListModules", {})
                 proc.stdin.write(msg)
                 proc.stdin.flush()
 
@@ -166,7 +186,7 @@ def main() -> None:
 
             else:
                 print(f"Unknown command: {cmd}")
-                print("Commands: hello, shutdown, module <name> [args_json], raw <json>, quit")
+                print("Commands: hello, info, list, shutdown, module <name> [args_json], raw <json>, quit")
 
     except KeyboardInterrupt:
         print()

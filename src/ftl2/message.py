@@ -33,6 +33,10 @@ class GateProtocol:
         "Module",  # Execute standard module
         "FTLModule",  # Execute FTL async module
         "Shutdown",  # Clean shutdown
+        "ListModules",  # List bundled modules
+        "ListModulesResult",  # Response with module list
+        "Info",  # Request gate info
+        "InfoResult",  # Response with gate info
         "ModuleResult",  # Standard module result
         "FTLModuleResult",  # FTL module result
         "ModuleNotFound",  # Module not in bundle
