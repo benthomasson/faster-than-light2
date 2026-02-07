@@ -321,6 +321,18 @@ class SSHHost:
             stdout, _, rc = await self.run(f"test -f {path}")
             return rc == 0
 
+    async def path_exists(self, path: str) -> bool:
+        """Check if a path (file or directory) exists on the remote host.
+
+        Args:
+            path: Path to check
+
+        Returns:
+            True if path exists (file, directory, or symlink)
+        """
+        stdout, _, rc = await self.run(f"test -e {path}")
+        return rc == 0
+
     async def write_file(self, path: str, content: bytes) -> None:
         """Write content to a file on the remote host.
 

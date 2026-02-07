@@ -26,6 +26,11 @@ SHADOWED_MODULES: dict[str, str] = {
     "ansible.builtin.template": "template",
     "fetch": "fetch",
     "ansible.builtin.fetch": "fetch",
+    # Shell module - Ansible's shell.py is documentation-only (no main function).
+    # Ansible handles it via action plugins that redirect to command module.
+    # FTL2 implements it natively via SSH command execution.
+    "shell": "shell",
+    "ansible.builtin.shell": "shell",
 }
 
 

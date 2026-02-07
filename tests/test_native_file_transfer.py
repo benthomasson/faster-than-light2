@@ -312,3 +312,202 @@ class TestSSHHelperMethods:
         from ftl2.ssh import SSHHost
 
         assert hasattr(SSHHost, "rename")
+
+    def test_ssh_host_has_path_exists(self):
+        """SSHHost has path_exists method."""
+        from ftl2.ssh import SSHHost
+
+        assert hasattr(SSHHost, "path_exists")
+
+
+class TestNativeShell:
+    """Tests for the native shell() method."""
+
+    @pytest.fixture
+    def mock_context(self):
+        """Create a mock automation context."""
+        context = MagicMock()
+        context.hosts = MagicMock()
+        context.hosts.__getitem__ = MagicMock(return_value=[])
+        return context
+
+    @pytest.mark.asyncio
+    async def test_shell_basic_command(self, mock_context):
+        """shell() executes basic command through shell."""
+        proxy = HostScopedProxy(mock_context, "localhost")
+
+        result = await proxy.shell(cmd="echo hello")
+
+        assert result["changed"] is True
+        assert result["stdout"].strip() == "hello"
+        assert result["rc"] == 0
+        assert result["cmd"] == "echo hello"
+
+    @pytest.mark.asyncio
+    async def test_shell_with_pipes(self, mock_context):
+        """shell() supports pipes."""
+        proxy = HostScopedProxy(mock_context, "localhost")
+
+        result = await proxy.shell(cmd="echo 'line1\nline2\nline3' | wc -l")
+
+        assert result["changed"] is True
+        assert result["stdout"].strip() == "3"
+        assert result["rc"] == 0
+
+    @pytest.mark.asyncio
+    async def test_shell_with_redirects(self, mock_context):
+        """shell() supports redirects."""
+        proxy = HostScopedProxy(mock_context, "localhost")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dest = Path(tmpdir) / "output.txt"
+
+            result = await proxy.shell(cmd=f"echo 'redirected' > {dest}")
+
+            assert result["changed"] is True
+            assert result["rc"] == 0
+            assert dest.read_text().strip() == "redirected"
+
+    @pytest.mark.asyncio
+    async def test_shell_with_env_vars(self, mock_context):
+        """shell() expands environment variables."""
+        proxy = HostScopedProxy(mock_context, "localhost")
+
+        result = await proxy.shell(cmd="echo $HOME")
+
+        assert result["changed"] is True
+        assert result["rc"] == 0
+        # $HOME should be expanded to something non-empty
+        assert len(result["stdout"].strip()) > 0
+
+    @pytest.mark.asyncio
+    async def test_shell_creates_skips_if_exists(self, mock_context):
+        """shell() skips execution if creates path exists."""
+        proxy = HostScopedProxy(mock_context, "localhost")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            marker = Path(tmpdir) / "marker"
+            marker.touch()
+
+            result = await proxy.shell(
+                cmd="echo 'should not run'",
+                creates=str(marker)
+            )
+
+            assert result["changed"] is False
+            assert result["rc"] == 0
+            assert "skipped" in result.get("msg", "")
+
+    @pytest.mark.asyncio
+    async def test_shell_creates_runs_if_missing(self, mock_context):
+        """shell() runs if creates path doesn't exist."""
+        proxy = HostScopedProxy(mock_context, "localhost")
+
+        result = await proxy.shell(
+            cmd="echo 'should run'",
+            creates="/nonexistent/path/that/doesnt/exist"
+        )
+
+        assert result["changed"] is True
+        assert result["stdout"].strip() == "should run"
+
+    @pytest.mark.asyncio
+    async def test_shell_removes_skips_if_missing(self, mock_context):
+        """shell() skips execution if removes path doesn't exist."""
+        proxy = HostScopedProxy(mock_context, "localhost")
+
+        result = await proxy.shell(
+            cmd="echo 'should not run'",
+            removes="/nonexistent/path"
+        )
+
+        assert result["changed"] is False
+        assert result["rc"] == 0
+        assert "skipped" in result.get("msg", "")
+
+    @pytest.mark.asyncio
+    async def test_shell_removes_runs_if_exists(self, mock_context):
+        """shell() runs if removes path exists."""
+        proxy = HostScopedProxy(mock_context, "localhost")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            marker = Path(tmpdir) / "marker"
+            marker.touch()
+
+            result = await proxy.shell(
+                cmd="echo 'should run'",
+                removes=str(marker)
+            )
+
+            assert result["changed"] is True
+            assert result["stdout"].strip() == "should run"
+
+    @pytest.mark.asyncio
+    async def test_shell_with_chdir(self, mock_context):
+        """shell() changes to chdir before execution."""
+        import os
+        proxy = HostScopedProxy(mock_context, "localhost")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = await proxy.shell(cmd="pwd", chdir=tmpdir)
+
+            assert result["changed"] is True
+            # Use realpath to resolve symlinks (e.g., /var -> /private/var on macOS)
+            assert os.path.realpath(result["stdout"].strip()) == os.path.realpath(tmpdir)
+
+    @pytest.mark.asyncio
+    async def test_shell_with_bash(self, mock_context):
+        """shell() uses specified executable."""
+        proxy = HostScopedProxy(mock_context, "localhost")
+
+        # Bash-specific brace expansion
+        result = await proxy.shell(
+            cmd="echo {1..3}",
+            executable="/bin/bash"
+        )
+
+        assert result["changed"] is True
+        assert result["stdout"].strip() == "1 2 3"
+
+    @pytest.mark.asyncio
+    async def test_shell_nonzero_exit_code(self, mock_context):
+        """shell() captures non-zero exit codes."""
+        proxy = HostScopedProxy(mock_context, "localhost")
+
+        result = await proxy.shell(cmd="exit 42")
+
+        assert result["changed"] is True
+        assert result["rc"] == 42
+
+    @pytest.mark.asyncio
+    async def test_shell_captures_stderr(self, mock_context):
+        """shell() captures stderr output."""
+        proxy = HostScopedProxy(mock_context, "localhost")
+
+        result = await proxy.shell(cmd="echo error >&2")
+
+        assert result["changed"] is True
+        assert "error" in result["stderr"]
+
+    @pytest.mark.asyncio
+    async def test_shell_stdout_lines(self, mock_context):
+        """shell() provides stdout_lines list."""
+        proxy = HostScopedProxy(mock_context, "localhost")
+
+        result = await proxy.shell(cmd="echo -e 'line1\nline2\nline3'")
+
+        assert result["changed"] is True
+        assert "stdout_lines" in result
+        assert len(result["stdout_lines"]) == 3
+
+
+class TestShellShadowed:
+    """Tests for shell module shadowing."""
+
+    def test_shell_is_shadowed(self):
+        """shell module is registered as shadowed."""
+        from ftl2.module_loading.shadowed import is_shadowed, get_native_method
+
+        assert is_shadowed("shell")
+        assert is_shadowed("ansible.builtin.shell")
+        assert get_native_method("shell") == "shell"

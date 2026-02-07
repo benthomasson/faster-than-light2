@@ -535,6 +535,155 @@ class HostScopedProxy:
             "src": src,
         }
 
+    async def shell(
+        self,
+        cmd: str,
+        chdir: str | None = None,
+        creates: str | None = None,
+        removes: str | None = None,
+        executable: str = "/bin/sh",
+        stdin: str | None = None,
+    ) -> dict[str, Any]:
+        """Execute a command through a shell.
+
+        This is the FTL2-native implementation that shadows Ansible's shell
+        module. Unlike the command module, this runs through a shell interpreter,
+        enabling pipes, redirects, environment variables, and shell builtins.
+
+        Args:
+            cmd: The command to execute (passed to shell via -c)
+            chdir: Change to this directory before running the command
+            creates: If this path exists, skip execution (for idempotency)
+            removes: If this path does NOT exist, skip execution (for idempotency)
+            executable: Shell to use (default: /bin/sh). Use /bin/bash for bash features.
+            stdin: Data to send to the command's stdin
+
+        Returns:
+            dict with 'changed', 'stdout', 'stderr', 'rc', 'cmd'
+
+        Example:
+            # Basic shell command with pipes
+            await ftl.webserver.shell(cmd="ps aux | grep nginx | wc -l")
+
+            # With redirects
+            await ftl.webserver.shell(cmd="echo 'Hello' > /tmp/hello.txt")
+
+            # Idempotent - only run if file doesn't exist
+            await ftl.webserver.shell(
+                cmd="expensive-setup-command",
+                creates="/var/lib/app/.initialized"
+            )
+
+            # Use bash for advanced features
+            await ftl.webserver.shell(
+                cmd="for i in {1..5}; do echo $i; done",
+                executable="/bin/bash"
+            )
+        """
+        import shlex
+        import subprocess
+        import time
+
+        # For localhost, execute locally
+        if self._target in ("local", "localhost"):
+            # Handle creates/removes idempotency
+            from pathlib import Path
+
+            if creates and Path(creates).exists():
+                return {
+                    "changed": False,
+                    "stdout": "",
+                    "stderr": "",
+                    "rc": 0,
+                    "cmd": cmd,
+                    "msg": f"skipped, since {creates} exists",
+                }
+
+            if removes and not Path(removes).exists():
+                return {
+                    "changed": False,
+                    "stdout": "",
+                    "stderr": "",
+                    "rc": 0,
+                    "cmd": cmd,
+                    "msg": f"skipped, since {removes} does not exist",
+                }
+
+            # Build and execute locally
+            start_time = time.time()
+            result = subprocess.run(
+                [executable, "-c", cmd],
+                cwd=chdir,
+                input=stdin,
+                capture_output=True,
+                text=True,
+            )
+            end_time = time.time()
+
+            return {
+                "changed": True,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "rc": result.returncode,
+                "cmd": cmd,
+                "delta": end_time - start_time,
+                "stdout_lines": result.stdout.splitlines(),
+                "stderr_lines": result.stderr.splitlines(),
+            }
+
+        # Remote execution via SSH
+        host_configs = await self._get_host_configs()
+        if not host_configs:
+            raise ValueError(f"No hosts found for target: {self._target}")
+
+        host_config = host_configs[0]
+        ssh = await self._context._get_ssh_connection(host_config)
+
+        # Handle creates/removes idempotency
+        if creates:
+            exists = await ssh.path_exists(creates)
+            if exists:
+                return {
+                    "changed": False,
+                    "stdout": "",
+                    "stderr": "",
+                    "rc": 0,
+                    "cmd": cmd,
+                    "msg": f"skipped, since {creates} exists",
+                }
+
+        if removes:
+            exists = await ssh.path_exists(removes)
+            if not exists:
+                return {
+                    "changed": False,
+                    "stdout": "",
+                    "stderr": "",
+                    "rc": 0,
+                    "cmd": cmd,
+                    "msg": f"skipped, since {removes} does not exist",
+                }
+
+        # Build shell command: executable -c 'cmd'
+        # Handle chdir by prefixing with cd
+        if chdir:
+            full_cmd = f"cd {shlex.quote(chdir)} && {executable} -c {shlex.quote(cmd)}"
+        else:
+            full_cmd = f"{executable} -c {shlex.quote(cmd)}"
+
+        # Execute via SSH
+        stdout, stderr, rc = await ssh.run(full_cmd, stdin=stdin or "")
+
+        return {
+            "changed": True,
+            "stdout": stdout,
+            "stderr": stderr,
+            "rc": rc,
+            "cmd": cmd,
+            "stdout_lines": stdout.splitlines(),
+            "stderr_lines": stderr.splitlines(),
+        }
+
     def __getattr__(self, name: str) -> "HostScopedModuleProxy":
         """Return a module proxy scoped to this host/group.
 
