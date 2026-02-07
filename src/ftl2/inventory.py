@@ -203,22 +203,7 @@ def load_inventory(inventory_file: str | Path) -> Inventory:
 
             inventory.add_group(group)
 
-    # Validate that at least one host was loaded
-    all_hosts = inventory.get_all_hosts()
-    if not all_hosts:
-        raise ValueError(
-            f"No hosts loaded from inventory '{path}'\n"
-            f"  Possible causes:\n"
-            f"  - Using nested 'all.children' structure (not supported)\n"
-            f"  - No hosts defined in top-level groups\n"
-            f"  - Empty or malformed YAML\n\n"
-            f"  Expected structure:\n"
-            f"    groupname:\n"
-            f"      hosts:\n"
-            f"        hostname:\n"
-            f"          ansible_host: 127.0.0.1"
-        )
-
+    # Empty inventories are valid - they can be populated with add_host()
     return inventory
 
 

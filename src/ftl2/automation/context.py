@@ -422,16 +422,19 @@ class AutomationContext:
             for group_name, group_data in inventory.items():
                 group = HostGroup(name=group_name)
                 if isinstance(group_data, dict) and "hosts" in group_data:
-                    for host_name, host_data in group_data["hosts"].items():
-                        host_data = host_data or {}
-                        host = HostConfig(
-                            name=host_name,
-                            ansible_host=host_data.get("ansible_host", host_name),
-                            ansible_port=host_data.get("ansible_port", 22),
-                            ansible_user=host_data.get("ansible_user", ""),
-                            ansible_connection=host_data.get("ansible_connection", "ssh"),
-                        )
-                        group.add_host(host)
+                    hosts_data = group_data["hosts"]
+                    # Handle empty hosts dict (hosts: {})
+                    if hosts_data:
+                        for host_name, host_data in hosts_data.items():
+                            host_data = host_data or {}
+                            host = HostConfig(
+                                name=host_name,
+                                ansible_host=host_data.get("ansible_host", host_name),
+                                ansible_port=host_data.get("ansible_port", 22),
+                                ansible_user=host_data.get("ansible_user", ""),
+                                ansible_connection=host_data.get("ansible_connection", "ssh"),
+                            )
+                            group.add_host(host)
                 inv.add_group(group)
             return inv
 

@@ -446,6 +446,52 @@ webservers:
                 assert len(ftl.results) >= 1
                 assert ftl.results[-1].module == "command"
 
+    def test_empty_inventory_dict(self):
+        """Test that empty inventory dict loads successfully."""
+        context = AutomationContext(inventory={
+            "minecraft": {
+                "hosts": {}
+            }
+        })
+
+        # Group should exist even without hosts
+        assert "minecraft" in context.hosts.groups
+        assert len(context.hosts["minecraft"]) == 0
+
+    @pytest.mark.asyncio
+    async def test_empty_inventory_from_file(self):
+        """Test that empty inventory file loads successfully."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            inv_file = Path(tmpdir) / "inventory.yml"
+            inv_file.write_text("""
+minecraft:
+  hosts: {}
+""")
+
+            context = AutomationContext(inventory=str(inv_file))
+
+            # Group should exist even without hosts
+            assert "minecraft" in context.hosts.groups
+
+    @pytest.mark.asyncio
+    async def test_empty_inventory_with_add_host(self):
+        """Test provisioning workflow: empty inventory + add_host."""
+        context = AutomationContext(inventory={
+            "servers": {
+                "hosts": {}
+            }
+        })
+
+        # Start with empty group
+        assert len(context.hosts["servers"]) == 0
+
+        # Add a host dynamically
+        context.add_host("web01", ansible_host="192.168.1.10", groups=["servers"])
+
+        # Now the group has a host
+        assert len(context.hosts["servers"]) == 1
+        assert "web01" in context.hosts
+
 
 class TestAddHost:
     """Tests for dynamic host registration with add_host()."""
