@@ -17,6 +17,15 @@ SHADOWED_MODULES: dict[str, str] = {
     # ping → ping
     "ping": "ping",
     "ansible.builtin.ping": "ping",
+    # File transfer modules - these MUST be native because they read local files
+    # and transfer to remote hosts. Ansible modules can't do this as they run
+    # on the remote side and can't access the controller's filesystem.
+    "copy": "copy",
+    "ansible.builtin.copy": "copy",
+    "template": "template",
+    "ansible.builtin.template": "template",
+    "fetch": "fetch",
+    "ansible.builtin.fetch": "fetch",
 }
 
 

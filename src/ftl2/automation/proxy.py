@@ -232,6 +232,309 @@ class HostScopedProxy:
         except Exception as e:
             raise FTL2ConnectionError(f"Ping failed: {e}") from e
 
+    async def _get_host_configs(self) -> list:
+        """Resolve target to list of host configs."""
+        hosts_proxy = self._context.hosts
+        try:
+            return hosts_proxy[self._target]
+        except KeyError:
+            return []
+
+    async def copy(
+        self,
+        src: str | None = None,
+        dest: str = "",
+        content: str | None = None,
+        mode: str | None = None,
+        owner: str | None = None,
+        group: str | None = None,
+        backup: bool = False,
+    ) -> dict[str, Any]:
+        """Copy a local file to the remote host via SFTP.
+
+        This is the FTL2-native implementation that shadows Ansible's copy
+        module. Unlike bundled modules, this reads the source file locally
+        and transfers it directly via SFTP.
+
+        Args:
+            src: Source file path (on controller). Relative paths resolve from CWD.
+            dest: Destination file path (on target). Required.
+            content: Inline content to write instead of src file.
+            mode: File mode (e.g., "0644", "755")
+            owner: File owner username
+            group: File group name
+            backup: Create timestamped backup if dest exists
+
+        Returns:
+            dict with 'changed', 'dest', 'src', and optionally 'backup'
+
+        Raises:
+            FileNotFoundError: If src doesn't exist
+            ValueError: If neither src nor content provided
+
+        Example:
+            await ftl.webserver.copy(src="nginx.conf", dest="/etc/nginx/nginx.conf")
+            await ftl.webserver.copy(content="Hello", dest="/tmp/hello.txt")
+        """
+        from pathlib import Path
+        from datetime import datetime
+
+        if not dest:
+            raise ValueError("dest is required")
+
+        if not src and not content:
+            raise ValueError("Either 'src' or 'content' must be provided")
+
+        # Read local file content
+        if src:
+            src_path = Path(src)
+            if not src_path.is_absolute():
+                src_path = Path.cwd() / src_path
+
+            if not src_path.exists():
+                raise FileNotFoundError(f"Source file not found: {src_path}")
+
+            file_content = src_path.read_bytes()
+        else:
+            # Inline content
+            file_content = content.encode("utf-8") if isinstance(content, str) else content
+
+        # For localhost, use local file operations
+        if self._target in ("local", "localhost"):
+            dest_path = Path(dest)
+            changed = True
+            backup_path = None
+
+            # Check if content matches
+            if dest_path.exists():
+                if dest_path.read_bytes() == file_content:
+                    changed = False
+
+                # Create backup if requested
+                if backup and changed:
+                    backup_path = f"{dest}.{datetime.now().strftime('%Y%m%d%H%M%S')}"
+                    dest_path.rename(backup_path)
+
+            if changed:
+                dest_path.parent.mkdir(parents=True, exist_ok=True)
+                dest_path.write_bytes(file_content)
+
+            # Set mode
+            if mode:
+                mode_str = mode.lstrip("0") if mode.startswith("0") else mode
+                mode_int = int(mode_str, 8)
+                dest_path.chmod(mode_int)
+
+            result: dict[str, Any] = {
+                "changed": changed,
+                "dest": dest,
+                "src": str(src_path) if src else "<content>",
+            }
+            if backup_path:
+                result["backup"] = backup_path
+            return result
+
+        # Remote execution via SFTP
+        host_configs = await self._get_host_configs()
+        if not host_configs:
+            raise ValueError(f"No hosts found for target: {self._target}")
+
+        # Execute on first host (copy is typically run on single host)
+        # For group operations, this would need to loop
+        host_config = host_configs[0]
+        ssh = await self._context._get_ssh_connection(host_config)
+
+        changed = True
+        backup_path = None
+
+        # Check if content matches (idempotency)
+        remote_content = await ssh.read_file_or_none(dest)
+        if remote_content == file_content:
+            changed = False
+
+        # Create backup if requested
+        if backup and changed and remote_content is not None:
+            backup_path = f"{dest}.{datetime.now().strftime('%Y%m%d%H%M%S')}"
+            await ssh.rename(dest, backup_path)
+
+        # Write file
+        if changed:
+            await ssh.write_file(dest, file_content)
+
+        # Set mode
+        if mode:
+            mode_str = mode.lstrip("0") if mode.startswith("0") else mode
+            mode_int = int(mode_str, 8)
+            current_stat = await ssh.stat(dest)
+            if current_stat and current_stat["mode"] != mode_int:
+                await ssh.chmod(dest, mode_int)
+                changed = True
+
+        # Set ownership
+        if owner or group:
+            await ssh.chown(dest, owner, group)
+            changed = True
+
+        result = {
+            "changed": changed,
+            "dest": dest,
+            "src": str(src_path) if src else "<content>",
+        }
+        if backup_path:
+            result["backup"] = backup_path
+        return result
+
+    async def template(
+        self,
+        src: str,
+        dest: str,
+        mode: str | None = None,
+        owner: str | None = None,
+        group: str | None = None,
+        **variables: Any,
+    ) -> dict[str, Any]:
+        """Render a Jinja2 template and copy to remote host.
+
+        This is the FTL2-native implementation that shadows Ansible's template
+        module. Renders the template locally using Jinja2, then transfers the
+        result via SFTP.
+
+        Args:
+            src: Template file path (on controller). Relative paths resolve from CWD.
+            dest: Destination file path (on target)
+            mode: File mode (e.g., "0644")
+            owner: File owner username
+            group: File group name
+            **variables: Template variables passed to Jinja2
+
+        Returns:
+            dict with 'changed', 'dest', 'src'
+
+        Raises:
+            FileNotFoundError: If template doesn't exist
+
+        Example:
+            await ftl.webserver.template(
+                src="nginx.conf.j2",
+                dest="/etc/nginx/nginx.conf",
+                server_name="example.com",
+                port=8080,
+            )
+        """
+        from pathlib import Path
+        from jinja2 import Environment, FileSystemLoader
+
+        # Resolve template path
+        src_path = Path(src)
+        if not src_path.is_absolute():
+            src_path = Path.cwd() / src_path
+
+        if not src_path.exists():
+            raise FileNotFoundError(f"Template not found: {src_path}")
+
+        # Set up Jinja2 environment
+        env = Environment(
+            loader=FileSystemLoader(src_path.parent),
+            keep_trailing_newline=True,
+        )
+        template = env.get_template(src_path.name)
+
+        # Render template
+        rendered = template.render(**variables)
+        content = rendered.encode("utf-8")
+
+        # Use copy() for the actual transfer (handles idempotency, permissions)
+        # Pass content instead of src since we've already rendered
+        result = await self.copy(
+            content=rendered,
+            dest=dest,
+            mode=mode,
+            owner=owner,
+            group=group,
+        )
+
+        # Update result to show template source
+        result["src"] = str(src_path)
+        return result
+
+    async def fetch(
+        self,
+        src: str,
+        dest: str,
+        flat: bool = False,
+    ) -> dict[str, Any]:
+        """Fetch a file from remote host to local.
+
+        This is the FTL2-native implementation that shadows Ansible's fetch
+        module. Reads the file from the remote host via SFTP and writes it
+        locally.
+
+        Args:
+            src: Source file path (on remote)
+            dest: Destination directory or file path (on controller)
+            flat: If True, write directly to dest. If False, create
+                  dest/hostname/src structure (Ansible default)
+
+        Returns:
+            dict with 'changed', 'dest', 'src'
+
+        Raises:
+            FileNotFoundError: If remote file doesn't exist
+
+        Example:
+            await ftl.webserver.fetch(src="/var/log/nginx/error.log", dest="./logs/")
+        """
+        from pathlib import Path
+
+        # For localhost, just copy locally
+        if self._target in ("local", "localhost"):
+            src_path = Path(src)
+            if not src_path.exists():
+                raise FileNotFoundError(f"File not found: {src}")
+
+            content = src_path.read_bytes()
+            dest_path = Path(dest)
+
+            if not flat:
+                dest_path = dest_path / "localhost" / src.lstrip("/")
+
+            dest_path.parent.mkdir(parents=True, exist_ok=True)
+            dest_path.write_bytes(content)
+
+            return {
+                "changed": True,
+                "dest": str(dest_path),
+                "src": src,
+            }
+
+        # Remote fetch via SFTP
+        host_configs = await self._get_host_configs()
+        if not host_configs:
+            raise ValueError(f"No hosts found for target: {self._target}")
+
+        host_config = host_configs[0]
+        ssh = await self._context._get_ssh_connection(host_config)
+
+        # Read remote file
+        content = await ssh.read_file_or_none(src)
+        if content is None:
+            raise FileNotFoundError(f"Remote file not found: {src}")
+
+        # Determine local destination
+        dest_path = Path(dest)
+        if not flat:
+            dest_path = dest_path / host_config.name / src.lstrip("/")
+
+        # Create parent directories and write
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        dest_path.write_bytes(content)
+
+        return {
+            "changed": True,
+            "dest": str(dest_path),
+            "src": src,
+        }
+
     def __getattr__(self, name: str) -> "HostScopedModuleProxy":
         """Return a module proxy scoped to this host/group.
 

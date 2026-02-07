@@ -357,6 +357,96 @@ class SSHHost:
             async with sftp.open(path, "rb") as f:
                 return await f.read()
 
+    async def read_file_or_none(self, path: str) -> bytes | None:
+        """Read a file from the remote host, returning None if not exists.
+
+        Args:
+            path: File path to read
+
+        Returns:
+            File content as bytes, or None if file doesn't exist
+        """
+        conn = await self.connect()
+
+        try:
+            async with conn.start_sftp_client() as sftp:
+                try:
+                    async with sftp.open(path, "rb") as f:
+                        return await f.read()
+                except asyncssh.SFTPNoSuchFile:
+                    return None
+        except Exception as e:
+            logger.warning(f"Error reading file {path}: {e}")
+            return None
+
+    async def chmod(self, path: str, mode: int) -> None:
+        """Set file permissions on the remote host.
+
+        Args:
+            path: File path
+            mode: Permission mode (e.g., 0o644)
+        """
+        conn = await self.connect()
+
+        async with conn.start_sftp_client() as sftp:
+            await sftp.chmod(path, mode)
+
+        logger.debug(f"Set mode {oct(mode)} on {path}")
+
+    async def chown(
+        self, path: str, owner: str | None = None, group: str | None = None
+    ) -> None:
+        """Set file ownership on the remote host.
+
+        Uses shell commands since SFTP chown requires uid/gid.
+
+        Args:
+            path: File path
+            owner: Owner username (optional)
+            group: Group name (optional)
+        """
+        if owner:
+            await self.run(f"chown {owner} {path}")
+        if group:
+            await self.run(f"chgrp {group} {path}")
+
+    async def stat(self, path: str) -> dict[str, int] | None:
+        """Get file info from the remote host.
+
+        Args:
+            path: File path
+
+        Returns:
+            Dict with mode, uid, gid, size, or None if file doesn't exist
+        """
+        conn = await self.connect()
+
+        try:
+            async with conn.start_sftp_client() as sftp:
+                attrs = await sftp.stat(path)
+                return {
+                    "mode": attrs.permissions & 0o7777,
+                    "uid": attrs.uid,
+                    "gid": attrs.gid,
+                    "size": attrs.size,
+                }
+        except asyncssh.SFTPNoSuchFile:
+            return None
+
+    async def rename(self, src: str, dest: str) -> None:
+        """Rename/move a file on the remote host.
+
+        Args:
+            src: Source path
+            dest: Destination path
+        """
+        conn = await self.connect()
+
+        async with conn.start_sftp_client() as sftp:
+            await sftp.rename(src, dest)
+
+        logger.debug(f"Renamed {src} to {dest}")
+
 
 class SSHConnectionPool:
     """Pool of SSH connections for host reuse.
