@@ -939,6 +939,56 @@ class RemoteModuleRunner(ModuleRunner):
         else:
             raise ModuleExecutionError(f"Unexpected response type: {msg_type}")
 
+    async def run_ftl_module(
+        self,
+        gate: Gate,
+        module_name: str,
+        module_source: bytes,
+        module_args: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Execute an FTL module (async Python) through the gate.
+
+        Unlike Ansible-style modules which run as subprocesses, FTL modules
+        are executed in-process by the gate using compile() and exec().
+
+        Args:
+            gate: Active gate connection
+            module_name: Name of the module (for error messages)
+            module_source: Python source code as bytes
+            module_args: Arguments to pass to the module's main() function
+
+        Returns:
+            Module result dictionary from the module's main() function
+
+        Raises:
+            ModuleExecutionError: If module execution fails
+        """
+        module_b64 = base64.b64encode(module_source).decode()
+
+        await self.protocol.send_message(
+            gate.gate_process.stdin,  # type: ignore[arg-type]
+            "FTLModule",
+            {
+                "module": module_b64,
+                "module_name": module_name,
+                "module_args": module_args,
+            },
+        )
+
+        response = await self.protocol.read_message(gate.gate_process.stdout)  # type: ignore[arg-type]
+
+        if response is None:
+            raise ModuleExecutionError("No response from gate for FTLModule")
+
+        msg_type, data = response
+
+        if msg_type == "FTLModuleResult":
+            return dict(data)
+        elif msg_type == "Error":
+            raise ModuleExecutionError(f"FTL module error: {data.get('message', 'Unknown error')}")
+        else:
+            raise ModuleExecutionError(f"Unexpected response type for FTLModule: {msg_type}")
+
     async def _close_gate(self, gate: Gate) -> None:
         """Close gate connection and clean up resources.
 
@@ -955,6 +1005,15 @@ class RemoteModuleRunner(ModuleRunner):
             pass  # Ignore errors during shutdown
         finally:
             gate.conn.close()
+
+    async def close_all(self) -> None:
+        """Close all cached gate connections.
+
+        Call this when done with remote execution to clean up resources.
+        """
+        for host_name in list(self.gate_cache.keys()):
+            gate = self.gate_cache.pop(host_name)
+            await self._close_gate(gate)
 
     def _dry_run_result(
         self,

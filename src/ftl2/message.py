@@ -143,27 +143,25 @@ class GateProtocol:
             ProtocolError: If message format is invalid
         """
         try:
-            # Read 8-byte hex length prefix, stripping newlines for
-            # manual debugging (allows entering length and JSON on
-            # separate lines when running interactively):
+            # Read 8-byte hex length prefix, skipping leading
+            # whitespace for manual debugging (allows entering
+            # length and JSON on separate lines interactively):
             #   python __main__.py
             #   0000000d
             #   ["Hello", {}]
             #   00000010
             #   ["Shutdown", {}]
-            while True:
-                length_bytes = await reader.read(8)
-                if not length_bytes:
-                    return None
-                length_bytes = length_bytes.strip()
-                if length_bytes:
-                    break
-
+            length_bytes = b""
             while len(length_bytes) < 8:
-                more = await reader.read(8 - len(length_bytes))
-                if not more:
+                chunk = await reader.read(8 - len(length_bytes))
+                if not chunk:
                     return None
-                length_bytes += more.strip()
+                # Skip leading whitespace only before prefix starts
+                if not length_bytes:
+                    chunk = chunk.lstrip()
+                    if not chunk:
+                        continue
+                length_bytes += chunk
 
             # Parse hex length
             try:
@@ -172,17 +170,21 @@ class GateProtocol:
             except (ValueError, UnicodeDecodeError) as e:
                 raise ProtocolError(f"Invalid hex length: {length_bytes!r}") from e
 
-            # Read message body, stripping newlines and retrying
-            # until we have the full message
-            while True:
-                json_bytes = await reader.read(length)
-                if not json_bytes:
+            # Read message body, skipping leading whitespace
+            # (newline between length and body in interactive mode)
+            # but not stripping body content to preserve byte count
+            json_bytes = b""
+            while len(json_bytes) < length:
+                remaining = length - len(json_bytes)
+                chunk = await reader.read(remaining)
+                if not chunk:
                     return None
-                while len(json_bytes) < length:
-                    json_bytes += await reader.read(length - len(json_bytes))
-                json_bytes = json_bytes.strip()
-                if json_bytes:
-                    break
+                # Skip leading whitespace only before body starts
+                if not json_bytes:
+                    chunk = chunk.lstrip()
+                    if not chunk:
+                        continue
+                json_bytes += chunk
 
             # Parse JSON
             try:

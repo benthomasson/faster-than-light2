@@ -136,6 +136,15 @@ def is_want_json_module(module: bytes) -> bool:
     return b"WANT_JSON" in module
 
 
+def is_zip_bundle(module: bytes) -> bool:
+    """Detect if a module is a ZIP bundle (built by build_bundle_from_fqcn).
+
+    ZIP files start with the magic bytes PK\\x03\\x04.
+    These bundles contain __main__.py and are executed as `python bundle.zip`.
+    """
+    return module[:4] == b"PK\x03\x04"
+
+
 def get_python_path() -> str:
     """Get the current Python path for subprocess environment setup."""
     return os.pathsep.join(sys.path)
@@ -235,7 +244,21 @@ async def execute_module(
             raise ModuleNotFoundError(module_name)
 
         # Detect module type and execute appropriately
-        if is_binary_module(module_bytes):
+        if is_zip_bundle(module_bytes):
+            # ZIP bundle (from build_bundle_from_fqcn) - execute as python bundle.zip
+            logger.info("Detected ZIP bundle")
+            bundle_file = os.path.join(tempdir, f"{module_name}.zip")
+            with open(bundle_file, "wb") as f:
+                f.write(module_bytes)
+            # Bundles expect JSON args on stdin (like new-style modules)
+            stdin_data = json.dumps({"ANSIBLE_MODULE_ARGS": module_args or {}}).encode()
+            stdout, stderr = await check_output(
+                f"{sys.executable} {bundle_file}",
+                stdin=stdin_data,
+                env=env,
+            )
+
+        elif is_binary_module(module_bytes):
             logger.info("Detected binary module")
             args_file = os.path.join(tempdir, "args")
             with open(args_file, "w") as f:

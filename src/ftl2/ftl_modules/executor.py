@@ -127,6 +127,7 @@ def _get_module(name: str) -> Any:
     from ftl2.ftl_modules.command import ftl_command, ftl_shell
     from ftl2.ftl_modules.pip import ftl_pip
     from ftl2.ftl_modules.aws.ec2 import ftl_ec2_instance
+    from ftl2.ftl_modules.swap import main as ftl_swap
 
     # Local registry to avoid circular import
     modules = {
@@ -138,6 +139,7 @@ def _get_module(name: str) -> Any:
         "command": ftl_command,
         "shell": ftl_shell,
         "pip": ftl_pip,
+        "swap": ftl_swap,
         "ec2_instance": ftl_ec2_instance,
         # FQCN mappings
         "ansible.builtin.file": ftl_file,
@@ -151,6 +153,53 @@ def _get_module(name: str) -> Any:
         "amazon.aws.ec2_instance": ftl_ec2_instance,
     }
     return modules.get(name)
+
+
+def is_ftl_module(name: str) -> bool:
+    """Check if a module is an FTL module (vs Ansible module).
+
+    Args:
+        name: Module name (short or FQCN)
+
+    Returns:
+        True if this is an FTL module that can be executed directly
+    """
+    return _get_module(name) is not None
+
+
+# Mapping of FTL module names to their source files
+_FTL_MODULE_FILES = {
+    "swap": "swap.py",
+    "file": "file.py",
+    "copy": "file.py",
+    "template": "file.py",
+    "command": "command.py",
+    "shell": "command.py",
+    "uri": "http.py",
+    "get_url": "http.py",
+    "pip": "pip.py",
+}
+
+
+def get_ftl_module_source(name: str) -> bytes:
+    """Get the source code of an FTL module for remote execution.
+
+    Args:
+        name: Module name (short name, not FQCN)
+
+    Returns:
+        Module source code as bytes
+
+    Raises:
+        ValueError: If module is not found
+    """
+    import importlib.resources as resources
+
+    if name not in _FTL_MODULE_FILES:
+        raise ValueError(f"Unknown FTL module: {name}")
+
+    filename = _FTL_MODULE_FILES[name]
+    return resources.read_binary("ftl2.ftl_modules", filename)
 
 
 async def execute(

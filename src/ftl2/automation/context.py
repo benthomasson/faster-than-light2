@@ -329,6 +329,7 @@ class AutomationContext:
         self._results: list[ExecuteResult] = []
         self._hosts_proxy: HostsProxy | None = None
         self._ssh_connections: dict[str, SSHHost] = {}
+        self._remote_runner: "RemoteModuleRunner | None" = None
         self._start_time: float | None = None
 
     def _load_bound_secrets(self) -> None:
@@ -839,14 +840,8 @@ class AutomationContext:
             )
             result.host = host.name
         else:
-            # Remote execution via SSH
-            ssh_host = await self._get_ssh_connection(host)
-            result = await execute(
-                module_name, params,
-                host=ssh_host,
-                check_mode=self.check_mode,
-                auto_install_deps=self.auto_install_deps,
-            )
+            # Remote execution via gate
+            result = await self._execute_remote_via_gate(host, module_name, params)
             result.host = host.name
 
         duration = time.time() - start_time
@@ -874,6 +869,164 @@ class AutomationContext:
 
         return result
 
+    async def _execute_remote_via_gate(
+        self,
+        host: HostConfig,
+        module_name: str,
+        params: dict[str, Any],
+    ) -> ExecuteResult:
+        """Execute module on remote host via gate process.
+
+        Uses the gate for connection pooling and efficient module execution.
+        FTL modules are executed via FTLModule messages (in-process Python),
+        while Ansible modules use Module messages (subprocess execution).
+
+        Args:
+            host: Target host configuration
+            module_name: Module to execute
+            params: Module parameters
+
+        Returns:
+            ExecuteResult with execution outcome
+        """
+        from ftl2.ftl_modules.executor import is_ftl_module, get_ftl_module_source, ExecuteResult
+        from ftl2.runners import ExecutionContext, Gate
+        from ftl2.types import ExecutionConfig, GateConfig
+        from getpass import getuser
+        import sys
+
+        if self._remote_runner is None:
+            raise RuntimeError("RemoteModuleRunner not initialized - use 'async with' context manager")
+
+        if is_ftl_module(module_name):
+            # FTL module - execute via FTLModule message through gate
+            source = get_ftl_module_source(module_name)
+            gate = await self._get_or_create_gate(host)
+            result_data = await self._remote_runner.run_ftl_module(
+                gate, module_name, source, params
+            )
+            # Cache gate for reuse
+            self._remote_runner.gate_cache[host.name] = gate
+        else:
+            # Ansible module - build bundle and send through gate
+            from ftl2.module_loading.bundle import build_bundle_from_fqcn
+            import base64
+
+            # Normalize to FQCN
+            if "." not in module_name:
+                fqcn = f"ansible.builtin.{module_name}"
+            else:
+                fqcn = module_name
+
+            # Build bundle (includes module + dependencies as ZIP)
+            bundle = build_bundle_from_fqcn(fqcn)
+
+            # Get gate connection
+            gate = await self._get_or_create_gate(host)
+
+            # Send bundle through gate as Module message
+            bundle_b64 = base64.b64encode(bundle.data).decode()
+            await self._remote_runner.protocol.send_message(
+                gate.gate_process.stdin,
+                "Module",
+                {
+                    "module": bundle_b64,
+                    "module_name": module_name,
+                    "module_args": params,
+                },
+            )
+
+            response = await self._remote_runner.protocol.read_message(gate.gate_process.stdout)
+
+            if response is None:
+                result_data = {"failed": True, "msg": "No response from gate"}
+            else:
+                msg_type, data = response
+                if msg_type == "ModuleResult":
+                    # Parse the stdout as JSON (Ansible module output)
+                    import json
+                    stdout = data.get("stdout", "")
+                    stderr = data.get("stderr", "")
+                    try:
+                        result_data = json.loads(stdout) if stdout.strip() else {}
+                        # Include stderr in result for debugging
+                        if stderr:
+                            result_data["_stderr"] = stderr
+                        # If result is empty, treat as failure
+                        if not result_data:
+                            result_data = {
+                                "failed": True,
+                                "msg": f"Empty response from module. stderr: {stderr}",
+                            }
+                    except json.JSONDecodeError as e:
+                        result_data = {
+                            "failed": True,
+                            "msg": f"Invalid JSON response: {e}",
+                            "stdout": stdout,
+                            "stderr": stderr,
+                        }
+                elif msg_type == "Error":
+                    result_data = {"failed": True, "msg": data.get("message", "Unknown error")}
+                else:
+                    result_data = {"failed": True, "msg": f"Unexpected response: {msg_type}"}
+
+            # Cache gate for reuse
+            self._remote_runner.gate_cache[host.name] = gate
+
+        # Convert to ExecuteResult
+        failed = result_data.get("failed", False)
+        return ExecuteResult(
+            success=not failed,
+            changed=result_data.get("changed", False),
+            output=result_data,
+            error=result_data.get("msg", "") if failed else "",
+            module=module_name,
+            host=host.name,
+            used_ftl=is_ftl_module(module_name),
+        )
+
+    async def _get_or_create_gate(self, host: HostConfig) -> "Gate":
+        """Get or create a gate connection for a host.
+
+        Args:
+            host: Target host configuration
+
+        Returns:
+            Active Gate connection
+        """
+        from ftl2.runners import ExecutionContext
+        from ftl2.types import ExecutionConfig, GateConfig
+        from getpass import getuser
+        import sys
+
+        if self._remote_runner is None:
+            raise RuntimeError("RemoteModuleRunner not initialized")
+
+        # Check cache first
+        if host.name in self._remote_runner.gate_cache:
+            gate = self._remote_runner.gate_cache.pop(host.name)
+            return gate
+
+        # Create new gate
+        ssh_host = host.ansible_host or host.name
+        ssh_port = host.ansible_port or 22
+        ssh_user = host.ansible_user or getuser()
+        ssh_password = host.vars.get("ansible_password")
+        ssh_key_file = host.vars.get("ssh_private_key_file")
+        interpreter = host.ansible_python_interpreter or sys.executable
+
+        context = ExecutionContext(
+            execution_config=ExecutionConfig(
+                module_name="ping",
+                dry_run=self.check_mode,
+            ),
+            gate_config=GateConfig(),
+        )
+
+        return await self._remote_runner._connect_gate(
+            ssh_host, ssh_port, ssh_user, ssh_password, ssh_key_file, interpreter, context
+        )
+
     async def _get_ssh_connection(self, host: HostConfig) -> SSHHost:
         """Get or create SSH connection for a host."""
         if host.name not in self._ssh_connections:
@@ -900,6 +1053,9 @@ class AutomationContext:
 
     async def __aenter__(self) -> "AutomationContext":
         """Enter the async context manager."""
+        from ftl2.runners import RemoteModuleRunner
+
+        self._remote_runner = RemoteModuleRunner()
         return self
 
     async def __aexit__(
@@ -927,6 +1083,10 @@ class AutomationContext:
         # Write recorded dependencies if enabled
         if self._record_deps and self._recorded_modules:
             self._write_recorded_deps()
+
+        # Close gate connections
+        if self._remote_runner:
+            await self._remote_runner.close_all()
 
         await self._close_ssh_connections()
 
