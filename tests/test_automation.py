@@ -447,6 +447,120 @@ webservers:
                 assert ftl.results[-1].module == "command"
 
 
+class TestAddHost:
+    """Tests for dynamic host registration with add_host()."""
+
+    def test_add_host_basic(self):
+        """Test adding a host with minimal parameters."""
+        context = AutomationContext()
+
+        host = context.add_host("web01", ansible_host="192.168.1.10")
+
+        assert host.name == "web01"
+        assert host.ansible_host == "192.168.1.10"
+        assert "web01" in context.hosts
+
+    def test_add_host_with_all_params(self):
+        """Test adding a host with all parameters."""
+        context = AutomationContext()
+
+        host = context.add_host(
+            hostname="db01",
+            ansible_host="192.168.1.20",
+            ansible_user="admin",
+            ansible_port=2222,
+            groups=["databases", "production"],
+            db_type="postgres",
+        )
+
+        assert host.name == "db01"
+        assert host.ansible_host == "192.168.1.20"
+        assert host.ansible_user == "admin"
+        assert host.ansible_port == 2222
+        assert host.vars.get("db_type") == "postgres"
+        assert "db01" in context.hosts
+        assert "databases" in context.hosts
+        assert "production" in context.hosts
+
+    def test_add_host_defaults_ansible_host_to_hostname(self):
+        """Test that ansible_host defaults to hostname if not specified."""
+        context = AutomationContext()
+
+        host = context.add_host("myhost.example.com")
+
+        assert host.ansible_host == "myhost.example.com"
+
+    def test_add_host_creates_groups_if_needed(self):
+        """Test that groups are created if they don't exist."""
+        context = AutomationContext()
+
+        # Group doesn't exist yet
+        assert "newgroup" not in context.hosts.groups
+
+        context.add_host("host01", groups=["newgroup"])
+
+        # Group now exists
+        assert "newgroup" in context.hosts.groups
+        assert "host01" in context.hosts
+
+    def test_add_host_adds_to_existing_group(self):
+        """Test adding host to an existing group."""
+        # Start with an inventory that has a group
+        context = AutomationContext(inventory={
+            "webservers": {
+                "hosts": {
+                    "web01": {"ansible_host": "192.168.1.10"},
+                }
+            }
+        })
+
+        # Add another host to the same group
+        context.add_host("web02", ansible_host="192.168.1.11", groups=["webservers"])
+
+        # Both hosts should be in the group
+        webservers = context.hosts["webservers"]
+        hostnames = [h.name for h in webservers]
+        assert "web01" in hostnames
+        assert "web02" in hostnames
+
+    def test_add_host_defaults_to_ungrouped(self):
+        """Test that hosts without groups go to 'ungrouped'."""
+        context = AutomationContext()
+
+        context.add_host("lonely", ansible_host="10.0.0.1")
+
+        assert "ungrouped" in context.hosts.groups
+
+    def test_add_host_invalidates_proxy_cache(self):
+        """Test that add_host invalidates the hosts proxy cache."""
+        context = AutomationContext()
+
+        # Access hosts to create the proxy
+        _ = context.hosts.all
+
+        # Add a host
+        context.add_host("newhost", ansible_host="10.0.0.5")
+
+        # The new host should be visible
+        assert "newhost" in context.hosts
+
+    @pytest.mark.asyncio
+    async def test_add_host_then_run_on(self):
+        """Test full workflow: add host then run_on it."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            async with automation() as ftl:
+                # Add a "remote" host that's actually local
+                ftl.add_host(
+                    "localtest",
+                    ansible_host="localhost",
+                    groups=["testgroup"],
+                )
+
+                # Verify it's in the inventory
+                assert "localtest" in ftl.hosts
+                assert "testgroup" in ftl.hosts.groups
+
+
 class TestHostsProxy:
     """Tests for HostsProxy class."""
 
@@ -468,6 +582,152 @@ class TestHostsProxy:
         proxy = HostsProxy(inv)
         host_names = list(proxy)
         assert "localhost" in host_names
+
+
+class TestHostScopedProxy:
+    """Tests for host-scoped module proxy (ftl.<host>.module() syntax)."""
+
+    def test_localhost_returns_host_scoped_proxy(self):
+        """Test that ftl.localhost returns HostScopedProxy."""
+        from ftl2.automation import HostScopedProxy
+
+        context = AutomationContext()
+        proxy = context.localhost
+
+        assert isinstance(proxy, HostScopedProxy)
+        assert proxy._target == "localhost"
+
+    def test_local_returns_host_scoped_proxy(self):
+        """Test that ftl.local returns HostScopedProxy."""
+        from ftl2.automation import HostScopedProxy
+
+        context = AutomationContext()
+        proxy = context.local
+
+        assert isinstance(proxy, HostScopedProxy)
+        assert proxy._target == "localhost"
+
+    def test_group_name_returns_host_scoped_proxy(self):
+        """Test that ftl.<group> returns HostScopedProxy."""
+        from ftl2.automation import HostScopedProxy
+
+        context = AutomationContext(inventory={
+            "webservers": {
+                "hosts": {
+                    "web01": {"ansible_host": "192.168.1.10"},
+                }
+            }
+        })
+
+        proxy = context.webservers
+        assert isinstance(proxy, HostScopedProxy)
+        assert proxy._target == "webservers"
+
+    def test_host_name_returns_host_scoped_proxy(self):
+        """Test that ftl.<host> returns HostScopedProxy."""
+        from ftl2.automation import HostScopedProxy
+
+        context = AutomationContext(inventory={
+            "webservers": {
+                "hosts": {
+                    "web01": {"ansible_host": "192.168.1.10"},
+                }
+            }
+        })
+
+        # Access by host name (not group name)
+        proxy = context.web01
+        assert isinstance(proxy, HostScopedProxy)
+        assert proxy._target == "web01"
+
+    def test_host_scoped_proxy_module_access(self):
+        """Test accessing modules on HostScopedProxy."""
+        from ftl2.automation import HostScopedProxy, HostScopedModuleProxy
+
+        context = AutomationContext()
+        proxy = context.localhost
+
+        # Access a module
+        file_proxy = proxy.file
+        assert isinstance(file_proxy, HostScopedModuleProxy)
+        assert file_proxy._target == "localhost"
+        assert file_proxy._path == "file"
+
+    def test_host_scoped_proxy_fqcn_access(self):
+        """Test accessing FQCN modules on HostScopedProxy."""
+        from ftl2.automation import HostScopedModuleProxy
+
+        context = AutomationContext(inventory={
+            "webservers": {
+                "hosts": {"web01": {}}
+            }
+        })
+
+        # Access FQCN module via group
+        proxy = context.webservers.ansible.posix.firewalld
+        assert isinstance(proxy, HostScopedModuleProxy)
+        assert proxy._target == "webservers"
+        assert proxy._path == "ansible.posix.firewalld"
+
+    @pytest.mark.asyncio
+    async def test_host_scoped_proxy_executes_run_on(self):
+        """Test that host-scoped proxy calls run_on."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            test_file = Path(tmpdir) / "test.txt"
+
+            async with automation() as ftl:
+                # Use host-scoped syntax
+                results = await ftl.localhost.file(path=str(test_file), state="touch")
+
+                # Should return list of results (like run_on)
+                assert isinstance(results, list)
+                assert len(results) == 1
+                assert results[0].success is True
+                assert test_file.exists()
+
+    @pytest.mark.asyncio
+    async def test_host_scoped_proxy_with_group(self):
+        """Test host-scoped proxy with group targets localhost."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            async with automation() as ftl:
+                # Add host to a group
+                ftl.add_host("localtest", ansible_host="localhost", groups=["testgroup"])
+
+                # Use group-scoped syntax (will use run_on)
+                results = await ftl.testgroup.command(cmd="echo hello")
+
+                assert isinstance(results, list)
+                assert len(results) == 1
+
+    def test_host_scoped_proxy_repr(self):
+        """Test HostScopedProxy repr."""
+        from ftl2.automation import HostScopedProxy
+
+        context = AutomationContext()
+        proxy = HostScopedProxy(context, "webservers")
+
+        assert repr(proxy) == "HostScopedProxy('webservers')"
+
+    def test_host_scoped_module_proxy_repr(self):
+        """Test HostScopedModuleProxy repr."""
+        from ftl2.automation import HostScopedModuleProxy
+
+        context = AutomationContext()
+        proxy = HostScopedModuleProxy(context, "webservers", "service")
+
+        assert repr(proxy) == "HostScopedModuleProxy('webservers', 'service')"
+
+    def test_modules_still_work(self):
+        """Test that regular modules still work (not intercepted as hosts)."""
+        context = AutomationContext()
+
+        # 'file' is a module, not a host - should return callable
+        file_module = context.file
+        assert callable(file_module)
+
+        # 'command' is a module
+        command_module = context.command
+        assert callable(command_module)
 
 
 class TestSecretsManagement:

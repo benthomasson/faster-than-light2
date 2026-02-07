@@ -453,6 +453,73 @@ class AutomationContext:
             self._hosts_proxy = HostsProxy(self._inventory)
         return self._hosts_proxy
 
+    def add_host(
+        self,
+        hostname: str,
+        ansible_host: str | None = None,
+        ansible_user: str | None = None,
+        ansible_port: int = 22,
+        groups: list[str] | None = None,
+        **vars: Any,
+    ) -> HostConfig:
+        """Dynamically add a host to the inventory.
+
+        Useful for provisioning workflows where you create a server
+        and then want to configure it immediately.
+
+        Args:
+            hostname: Name for the host (e.g., "web01")
+            ansible_host: IP address or hostname to connect to.
+                         Defaults to hostname if not specified.
+            ansible_user: SSH username for the connection
+            ansible_port: SSH port (default 22)
+            groups: List of group names to add this host to.
+                   Groups are created if they don't exist.
+            **vars: Additional host variables
+
+        Returns:
+            The created HostConfig object
+
+        Example:
+            # Provision a server and configure it
+            server = await ftl.community.general.linode_v4(label="web01", ...)
+            ip = server["instance"]["ipv4"][0]
+
+            ftl.add_host(
+                hostname="web01",
+                ansible_host=ip,
+                ansible_user="root",
+                groups=["webservers"],
+            )
+
+            # Now run_on works for the new host
+            await ftl.run_on("web01", "dnf", name="nginx", state="present")
+            await ftl.run_on("webservers", "service", name="nginx", state="started")
+        """
+        # Create the host config
+        host = HostConfig(
+            name=hostname,
+            ansible_host=ansible_host or hostname,
+            ansible_port=ansible_port,
+            ansible_user=ansible_user or "",
+            ansible_connection="ssh",
+            vars=vars,
+        )
+
+        # Add to specified groups (create groups if needed)
+        group_names = groups or ["ungrouped"]
+        for group_name in group_names:
+            group = self._inventory.get_group(group_name)
+            if group is None:
+                group = HostGroup(name=group_name)
+                self._inventory.add_group(group)
+            group.add_host(host)
+
+        # Invalidate the hosts proxy cache so it picks up the new host
+        self._hosts_proxy = None
+
+        return host
+
     @property
     def secrets(self) -> SecretsProxy:
         """Access secrets loaded from environment variables.

@@ -14,6 +14,97 @@ if TYPE_CHECKING:
     from ftl2.automation.context import AutomationContext
 
 
+class HostScopedProxy:
+    """Proxy that runs modules on a specific host or group.
+
+    Enables syntax like ftl.webservers.service(...) which is equivalent to
+    ftl.run_on("webservers", "service", ...).
+
+    Example:
+        ftl.webservers.service(name="nginx", state="restarted")
+        ftl.web01.file(path="/tmp/test", state="touch")
+        ftl.local.community.general.linode_v4(label="web01", ...)
+    """
+
+    def __init__(self, context: "AutomationContext", target: str):
+        """Initialize the host-scoped proxy.
+
+        Args:
+            context: The AutomationContext that handles execution
+            target: Host name or group name to target
+        """
+        self._context = context
+        self._target = target
+
+    def __getattr__(self, name: str) -> "HostScopedModuleProxy":
+        """Return a module proxy scoped to this host/group.
+
+        Args:
+            name: Module name or namespace component
+
+        Returns:
+            HostScopedModuleProxy for the module
+        """
+        if name.startswith("_"):
+            raise AttributeError(name)
+
+        return HostScopedModuleProxy(self._context, self._target, name)
+
+    def __repr__(self) -> str:
+        return f"HostScopedProxy({self._target!r})"
+
+
+class HostScopedModuleProxy:
+    """Proxy for a module scoped to a specific host/group.
+
+    Supports both simple modules and FQCN:
+        ftl.webservers.service(...)
+        ftl.webservers.ansible.posix.firewalld(...)
+    """
+
+    def __init__(self, context: "AutomationContext", target: str, path: str):
+        """Initialize the host-scoped module proxy.
+
+        Args:
+            context: The AutomationContext that handles execution
+            target: Host name or group name to target
+            path: Module name or namespace path
+        """
+        self._context = context
+        self._target = target
+        self._path = path
+
+    def __getattr__(self, name: str) -> "HostScopedModuleProxy":
+        """Extend the module path for FQCN support.
+
+        Args:
+            name: Next component of the namespace
+
+        Returns:
+            HostScopedModuleProxy with extended path
+        """
+        if name.startswith("_"):
+            raise AttributeError(name)
+
+        new_path = f"{self._path}.{name}"
+        return HostScopedModuleProxy(self._context, self._target, new_path)
+
+    async def __call__(self, **kwargs: Any) -> Any:
+        """Execute the module on the target host/group.
+
+        Args:
+            **kwargs: Module parameters
+
+        Returns:
+            For single host: ExecuteResult
+            For group: list[ExecuteResult]
+        """
+        return await self._context.run_on(self._target, self._path, **kwargs)
+
+    def __repr__(self) -> str:
+        return f"HostScopedModuleProxy({self._target!r}, {self._path!r})"
+
+
 class NamespaceProxy:
     """Proxy for FQCN namespace traversal.
 
@@ -99,23 +190,43 @@ class ModuleProxy:
         """
         self._context = context
 
-    def __getattr__(self, name: str) -> Callable[..., Any] | NamespaceProxy:
-        """Return async wrapper for module or namespace proxy for collections.
+    def __getattr__(self, name: str) -> Callable[..., Any] | NamespaceProxy | HostScopedProxy:
+        """Return async wrapper for module, host proxy, or namespace proxy.
+
+        Priority:
+        1. local/localhost -> HostScopedProxy for localhost
+        2. Host/group names -> HostScopedProxy for that target
+        3. Known modules -> async wrapper
+        4. Unknown names -> NamespaceProxy for FQCN
 
         Args:
-            name: Module name or namespace (e.g., "file", "amazon")
+            name: Module name, host/group name, or namespace
 
         Returns:
-            Async function for known modules, NamespaceProxy for namespaces
+            Async function for known modules, HostScopedProxy for hosts/groups,
+            NamespaceProxy for collection namespaces
 
         Raises:
-            AttributeError: If module doesn't exist and isn't a valid namespace
+            AttributeError: For private attributes or disabled modules
         """
         # Don't intercept private attributes
         if name.startswith("_"):
             raise AttributeError(name)
 
-        # Check if it's a known simple module first
+        # Check for local/localhost first
+        if name in ("local", "localhost"):
+            return HostScopedProxy(self._context, "localhost")
+
+        # Check if it's a host or group name
+        try:
+            hosts_proxy = self._context.hosts
+            if name in hosts_proxy.groups or name in hosts_proxy.keys():
+                return HostScopedProxy(self._context, name)
+        except Exception:
+            # Inventory not loaded or other issue - continue to module check
+            pass
+
+        # Check if it's a known simple module
         from ftl2.ftl_modules import get_module, list_modules
 
         module = get_module(name)

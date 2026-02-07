@@ -33,7 +33,12 @@ from ftl2.automation.context import (
     OutputMode,
     EventCallback,
 )
-from ftl2.automation.proxy import ModuleProxy, NamespaceProxy
+from ftl2.automation.proxy import (
+    ModuleProxy,
+    NamespaceProxy,
+    HostScopedProxy,
+    HostScopedModuleProxy,
+)
 
 __all__ = [
     "automation",
@@ -41,6 +46,8 @@ __all__ = [
     "AutomationError",
     "ModuleProxy",
     "NamespaceProxy",
+    "HostScopedProxy",
+    "HostScopedModuleProxy",
     "OutputMode",
 ]
 
