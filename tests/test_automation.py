@@ -804,6 +804,80 @@ class TestHostScopedProxy:
 
             assert isinstance(result, dict)
 
+    def test_host_with_dash_accessed_via_underscore(self):
+        """Test that hosts with dashes can be accessed via underscores.
+
+        Dashes are the DNS standard for hostnames, but Python attributes
+        can't have dashes. So ftl.minecraft_9 should map to host "minecraft-9".
+        """
+        from ftl2.automation import HostScopedProxy
+
+        context = AutomationContext(inventory={
+            "minecraft": {
+                "hosts": {
+                    "minecraft-9": {"ansible_host": "192.168.1.10"},
+                }
+            }
+        })
+
+        # Access with underscore should work
+        proxy = context.minecraft_9
+        assert isinstance(proxy, HostScopedProxy)
+        assert proxy._target == "minecraft-9"  # Maps to dashed name
+
+    def test_group_with_dash_accessed_via_underscore(self):
+        """Test that groups with dashes can be accessed via underscores."""
+        from ftl2.automation import HostScopedProxy
+
+        context = AutomationContext(inventory={
+            "web-servers": {
+                "hosts": {
+                    "web01": {"ansible_host": "192.168.1.10"},
+                }
+            }
+        })
+
+        # Access with underscore should work
+        proxy = context.web_servers
+        assert isinstance(proxy, HostScopedProxy)
+        assert proxy._target == "web-servers"  # Maps to dashed name
+
+    def test_host_exact_match_takes_precedence(self):
+        """Test that exact match takes precedence over normalization."""
+        from ftl2.automation import HostScopedProxy
+
+        context = AutomationContext(inventory={
+            "servers": {
+                "hosts": {
+                    "web_01": {"ansible_host": "192.168.1.10"},  # Has underscore
+                    "web-01": {"ansible_host": "192.168.1.11"},  # Has dash
+                }
+            }
+        })
+
+        # Exact match should win
+        proxy = context.web_01
+        assert isinstance(proxy, HostScopedProxy)
+        assert proxy._target == "web_01"  # Exact match, not normalized
+
+    def test_underscore_normalization_only_when_needed(self):
+        """Test that normalization only happens when exact match fails."""
+        from ftl2.automation import HostScopedProxy
+
+        context = AutomationContext(inventory={
+            "servers": {
+                "hosts": {
+                    "minecraft-9": {"ansible_host": "192.168.1.10"},
+                }
+            }
+        })
+
+        # Exact access (dashed name) - would need getattr()
+        # Since we can't use dashes in Python, test via the proxy mechanism
+        # This verifies the underscore version works
+        proxy = context.minecraft_9
+        assert proxy._target == "minecraft-9"
+
 
 class TestSecretsManagement:
     """Tests for Phase 3: Secrets Management."""

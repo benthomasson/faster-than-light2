@@ -222,10 +222,18 @@ class ModuleProxy:
             return HostScopedProxy(self._context, "localhost")
 
         # Check if it's a host or group name
+        # Also check with underscore→dash normalization since Python attributes
+        # can't have dashes but hostnames commonly do (DNS standard)
         try:
             hosts_proxy = self._context.hosts
+            # Try exact match first
             if name in hosts_proxy.groups or name in hosts_proxy.keys():
                 return HostScopedProxy(self._context, name)
+            # Try underscore→dash normalization (e.g., minecraft_9 → minecraft-9)
+            normalized = name.replace("_", "-")
+            if normalized != name:
+                if normalized in hosts_proxy.groups or normalized in hosts_proxy.keys():
+                    return HostScopedProxy(self._context, normalized)
         except Exception:
             # Inventory not loaded or other issue - continue to module check
             pass
