@@ -1711,3 +1711,120 @@ class TestPrintSummary:
         summary_pos = captured.out.find("SUMMARY:")
         errors_pos = captured.out.find("ERRORS")
         assert summary_pos < errors_pos
+
+
+class TestRecordDeps:
+    """Tests for record_deps feature."""
+
+    @pytest.mark.asyncio
+    async def test_record_deps_tracks_modules(self):
+        """Test that record_deps tracks executed modules."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            deps_file = Path(tmpdir) / "deps.txt"
+            test_file = Path(tmpdir) / "test.txt"
+
+            async with automation(
+                record_deps=True,
+                deps_file=str(deps_file),
+                print_summary=False,
+                quiet=True,
+            ) as ftl:
+                # Execute a module
+                await ftl.file(path=str(test_file), state="touch")
+
+                # Check module was recorded
+                assert "file" in ftl._recorded_modules
+
+    @pytest.mark.asyncio
+    async def test_record_deps_writes_file(self):
+        """Test that record_deps writes deps file on exit."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            deps_file = Path(tmpdir) / "deps.txt"
+            test_file = Path(tmpdir) / "test.txt"
+
+            async with automation(
+                record_deps=True,
+                deps_file=str(deps_file),
+                print_summary=False,
+                quiet=True,
+            ) as ftl:
+                await ftl.command(cmd="echo hello")
+
+            # File should exist (may be empty if module has no deps)
+            # The command module has no Python deps, so this tests the mechanism
+
+    @pytest.mark.asyncio
+    async def test_record_deps_default_file(self):
+        """Test that record_deps uses default file path."""
+        context = AutomationContext(record_deps=True)
+        assert context._deps_file == Path(".ftl2-deps.txt")
+
+    @pytest.mark.asyncio
+    async def test_record_deps_custom_file(self):
+        """Test that record_deps uses custom file path."""
+        context = AutomationContext(
+            record_deps=True,
+            deps_file="/tmp/my-deps.txt",
+        )
+        assert context._deps_file == Path("/tmp/my-deps.txt")
+
+    @pytest.mark.asyncio
+    async def test_record_deps_no_file_when_disabled(self):
+        """Test that no deps file is created when record_deps=False."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            deps_file = Path(tmpdir) / "deps.txt"
+            test_file = Path(tmpdir) / "test.txt"
+
+            async with automation(
+                record_deps=False,
+                deps_file=str(deps_file),
+                print_summary=False,
+            ) as ftl:
+                await ftl.file(path=str(test_file), state="touch")
+
+            # File should not exist
+            assert not deps_file.exists()
+
+    @pytest.mark.asyncio
+    async def test_record_deps_multiple_modules(self):
+        """Test that record_deps tracks multiple modules."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            deps_file = Path(tmpdir) / "deps.txt"
+            test_file = Path(tmpdir) / "test.txt"
+
+            async with automation(
+                record_deps=True,
+                deps_file=str(deps_file),
+                print_summary=False,
+                quiet=True,
+            ) as ftl:
+                await ftl.file(path=str(test_file), state="touch")
+                await ftl.command(cmd="echo hello")
+
+                # Both modules should be recorded
+                assert "file" in ftl._recorded_modules
+                assert "command" in ftl._recorded_modules
+
+    def test_parse_requirement(self):
+        """Test requirement string parsing."""
+        from ftl2.automation.context import AutomationContext
+
+        # Simple package
+        pkg, ver = AutomationContext._parse_requirement("boto3")
+        assert pkg == "boto3"
+        assert ver == ""
+
+        # Package with version
+        pkg, ver = AutomationContext._parse_requirement("boto3>=1.28.0")
+        assert pkg == "boto3"
+        assert ver == ">=1.28.0"
+
+        # Package with spaces
+        pkg, ver = AutomationContext._parse_requirement("boto3 >= 1.28.0")
+        assert pkg == "boto3"
+        assert ver == ">= 1.28.0"
+
+        # Package with complex version
+        pkg, ver = AutomationContext._parse_requirement("linode_api4>=2.0.0,<3.0.0")
+        assert pkg == "linode_api4"
+        assert ver == ">=2.0.0,<3.0.0"

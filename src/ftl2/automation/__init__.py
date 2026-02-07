@@ -66,6 +66,8 @@ async def automation(
     print_summary: bool = True,
     print_errors: bool = True,
     auto_install_deps: bool = False,
+    record_deps: bool = False,
+    deps_file: str = ".ftl2-deps.txt",
 ) -> AsyncGenerator[AutomationContext, None]:
     """Create an automation context for running FTL modules.
 
@@ -107,6 +109,11 @@ async def automation(
         auto_install_deps: Automatically install missing Python dependencies
                           using uv when an Ansible module requires packages
                           that aren't installed. Default is False.
+        record_deps: Record module dependencies during execution and write
+                    to deps_file on context exit. Use with auto_install_deps
+                    for development to capture all needed packages.
+        deps_file: Path to write recorded dependencies. Default is
+                  ".ftl2-deps.txt". Only used when record_deps=True.
 
     Yields:
         AutomationContext with ftl.module_name() access to all modules
@@ -205,6 +212,8 @@ async def automation(
         print_summary=print_summary,
         print_errors=print_errors,
         auto_install_deps=auto_install_deps,
+        record_deps=record_deps,
+        deps_file=deps_file,
     )
 
     try:

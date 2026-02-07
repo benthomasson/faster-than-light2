@@ -248,6 +248,8 @@ class AutomationContext:
         print_summary: bool = True,
         print_errors: bool = True,
         auto_install_deps: bool = False,
+        record_deps: bool = False,
+        deps_file: str | Path = ".ftl2-deps.txt",
     ):
         """Initialize the automation context.
 
@@ -285,6 +287,11 @@ class AutomationContext:
             auto_install_deps: Automatically install missing Python dependencies
                 using uv when an Ansible module requires packages that aren't
                 installed. Default is False (report error with install instructions).
+            record_deps: Record module dependencies during execution and write
+                to deps_file on context exit. Use with auto_install_deps for
+                development, then use the generated file for production builds.
+            deps_file: Path to write recorded dependencies. Default is
+                ".ftl2-deps.txt". Only used when record_deps=True.
         """
         self._enabled_modules = modules
         self._inventory = self._load_inventory(inventory)
@@ -299,6 +306,9 @@ class AutomationContext:
         self._print_summary = print_summary
         self._print_errors = print_errors
         self.auto_install_deps = auto_install_deps
+        self._record_deps = record_deps
+        self._deps_file = Path(deps_file)
+        self._recorded_modules: set[str] = set()
         self._proxy = ModuleProxy(self)
         self._results: list[ExecuteResult] = []
         self._hosts_proxy: HostsProxy | None = None
@@ -617,6 +627,10 @@ class AutomationContext:
             "check_mode": self.check_mode,
         })
 
+        # Record module for dependency tracking
+        if self._record_deps:
+            self._recorded_modules.add(module_name)
+
         # Execute and track result (check_mode and auto_install_deps passed to executor)
         result = await execute(
             module_name, params,
@@ -747,6 +761,10 @@ class AutomationContext:
 
         start_time = time.time()
 
+        # Record module for dependency tracking
+        if self._record_deps:
+            self._recorded_modules.add(module_name)
+
         # Inject bound secrets (script never sees these values)
         secret_injections = self._get_secret_bindings_for_module(module_name)
         if secret_injections:
@@ -854,7 +872,58 @@ class AutomationContext:
                 host = getattr(error, "host", "localhost") or "localhost"
                 print(f"  {error.module} on {host}: {error.error}")
 
+        # Write recorded dependencies if enabled
+        if self._record_deps and self._recorded_modules:
+            self._write_recorded_deps()
+
         await self._close_ssh_connections()
+
+    def _write_recorded_deps(self) -> None:
+        """Write recorded module dependencies to file.
+
+        Resolves each executed module to extract its Python package
+        requirements from the DOCUMENTATION string, then writes them
+        in requirements.txt format.
+        """
+        import re
+        from ftl2.module_loading.fqcn import resolve_fqcn
+        from ftl2.module_loading.requirements import get_module_requirements
+
+        deps: dict[str, tuple[str, str]] = {}  # package -> (version, source_module)
+
+        for fqcn in sorted(self._recorded_modules):
+            try:
+                module_path = resolve_fqcn(fqcn)
+                reqs = get_module_requirements(module_path)
+
+                for req in reqs.requirements:
+                    package, version = self._parse_requirement(req)
+                    if package not in deps:
+                        deps[package] = (version, fqcn)
+            except Exception:
+                continue  # Skip modules we can't resolve
+
+        if deps:
+            lines = []
+            for package in sorted(deps.keys()):
+                version, source = deps[package]
+                if version:
+                    lines.append(f"{package}{version}  # {source}")
+                else:
+                    lines.append(f"{package}  # {source}")
+
+            self._deps_file.write_text("\n".join(lines) + "\n")
+            if not self.quiet:
+                print(f"\nRecorded dependencies saved to {self._deps_file}")
+
+    @staticmethod
+    def _parse_requirement(req: str) -> tuple[str, str]:
+        """Parse 'package >= 1.0.0' into ('package', '>=1.0.0')."""
+        import re
+        match = re.match(r'^([a-zA-Z0-9_-]+)\s*(.*)$', req.strip())
+        if match:
+            return match.group(1), match.group(2).strip()
+        return req.strip(), ""
 
     def _print_host_summary(self) -> None:
         """Print per-host summary of what was done."""
