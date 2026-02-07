@@ -342,3 +342,34 @@ class InventoryError(FTL2Error):
             message=message,
         )
         super().__init__(message, context)
+
+
+class ExcludedModuleError(FTL2Error):
+    """Raised when user calls an Ansible module that doesn't apply to FTL2.
+
+    Some Ansible modules exist only as interfaces to Ansible's internal
+    execution model (connection plugins, playbook flow control, fact system).
+    These modules don't apply to FTL2's direct execution model.
+    """
+
+    def __init__(self, module: "ExcludedModule"):
+        from ftl2.module_loading.excluded import ExcludedModule
+
+        self.module = module
+        message = self._format_message()
+        super().__init__(message)
+
+    def _format_message(self) -> str:
+        lines = [
+            "",
+            "=" * 60,
+            f"Module '{self.module.name}' is not available in FTL2",
+            "=" * 60,
+            "",
+            f"Reason: {self.module.reason}",
+            "",
+            f"Alternative: {self.module.alternative}",
+        ]
+        if self.module.example:
+            lines.append(f"\nExample:{self.module.example}")
+        return "\n".join(lines)
