@@ -882,7 +882,7 @@ class AutomationContext:
                 )
             else:
                 await _asyncio.gather(*tasks)
-        except _asyncio.TimeoutError:
+        except (_asyncio.TimeoutError, _asyncio.CancelledError, KeyboardInterrupt):
             pass
 
     def _log_result(
