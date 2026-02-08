@@ -23,6 +23,7 @@ dependencies = [
     "importlib-resources>=5.0; python_version < '3.9'",
     "ftl-module-utils @ git+https://github.com/benthomasson/ftl_module_utils",
     "ftl-builtin-modules @ git+https://github.com/benthomasson/ftl_builtin_modules",
+    "ftl_collections @ git+https://github.com/benthomasson/ftl-collections",
 ]
 
 [project.optional-dependencies]
