@@ -401,14 +401,29 @@ async def execute_ftl_module(
         protocol: Gate protocol for sending responses
         writer: Output writer for sending results
         module_name: Name identifier for the module
-        module: Base64-encoded Python source code
+        module: Base64-encoded Python source code, or empty for baked-in lookup
         module_args: Arguments available to the module (passed to main)
     """
     logger.info(f"Executing FTL module: {module_name}")
 
     try:
-        # Decode and compile module
-        module_source = base64.b64decode(module)
+        # Load module source — from message or baked-in
+        if module:
+            module_source = base64.b64decode(module)
+        else:
+            # Try baked-in FTL module lookup
+            try:
+                import importlib.resources
+                baked = importlib.resources.files("ftl_modules_baked")
+                module_source = baked.joinpath(f"{module_name}.py").read_bytes()
+                logger.info(f"Loaded FTL module {module_name} from baked-in ftl_modules_baked/")
+            except (ImportError, FileNotFoundError, TypeError):
+                logger.info(f"FTL module {module_name} not found in gate")
+                await protocol.send_message(
+                    writer, "ModuleNotFound", {"module_name": module_name}
+                )
+                return
+
         module_compiled = compile(module_source, module_name, "exec")
 
         # Execute module in isolated namespace

@@ -913,13 +913,34 @@ class AutomationContext:
 
         ftl_attempted = False
         if is_ftl_module(module_name):
-            # FTL module - try executing via FTLModule message through gate
+            # FTL module - try name-only first (gate may have it baked in)
             try:
-                source = get_ftl_module_source(module_name)
                 gate = await self._get_or_create_gate(host)
-                result_data = await self._remote_runner.run_ftl_module(
-                    gate, module_name, source, params
+
+                # Send name-only FTLModule message
+                await self._remote_runner.protocol.send_message(
+                    gate.gate_process.stdin,
+                    "FTLModule",
+                    {
+                        "module_name": module_name,
+                        "module_args": params,
+                    },
                 )
+                response = await self._remote_runner.protocol.read_message(gate.gate_process.stdout)
+
+                if response is not None and response[0] == "ModuleNotFound":
+                    # Not baked in — send source
+                    source = get_ftl_module_source(module_name)
+                    result_data = await self._remote_runner.run_ftl_module(
+                        gate, module_name, source, params
+                    )
+                elif response is not None and response[0] == "FTLModuleResult":
+                    result_data = dict(response[1])
+                elif response is not None and response[0] == "Error":
+                    raise Exception(response[1].get("message", "Unknown FTL module error"))
+                else:
+                    raise Exception(f"Unexpected response: {response}")
+
                 # Cache gate for reuse
                 self._remote_runner.gate_cache[host.name] = gate
                 ftl_attempted = True

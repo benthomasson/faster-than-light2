@@ -314,9 +314,21 @@ class GateBuilder:
                 module_path = resolve_fqcn(fqcn)
                 logger.debug(f"Resolved {module} via FQCN {fqcn} to {module_path}")
             except Exception as e:
-                # Module may be FTL-only (e.g. swap) — no Ansible equivalent.
-                # Skip it; it will be sent via FTLModule message at runtime.
-                logger.debug(f"Skipping {module}: not found as Ansible module ({e})")
+                # Not an Ansible module — try FTL module
+                try:
+                    from ftl2.ftl_modules.executor import is_ftl_module as _is_ftl, get_ftl_module_source
+                    if _is_ftl(module):
+                        ftl_source = get_ftl_module_source(module)
+                        ftl_dir = gate_dir / "ftl_modules_baked"
+                        ftl_dir.mkdir(exist_ok=True)
+                        (ftl_dir / "__init__.py").touch()
+                        (ftl_dir / f"{module}.py").write_bytes(ftl_source)
+                        logger.debug(f"Installed FTL module {module} to {ftl_dir}")
+                        continue
+                except Exception:
+                    pass
+                # Neither Ansible nor FTL — skip it
+                logger.debug(f"Skipping {module}: not found as Ansible or FTL module ({e})")
                 continue
 
             # Copy module directly into gate
