@@ -921,28 +921,16 @@ class AutomationContext:
 
         if not ftl_attempted:
             # Ansible module - build bundle and send through gate
-            from ftl2.module_loading.bundle import build_bundle_from_fqcn
-            import base64
-
-            # Normalize to FQCN
-            if "." not in module_name:
-                fqcn = f"ansible.builtin.{module_name}"
-            else:
-                fqcn = module_name
-
-            # Build bundle (includes module + dependencies as ZIP)
-            bundle = build_bundle_from_fqcn(fqcn)
+            import json
 
             # Get gate connection
             gate = await self._get_or_create_gate(host)
 
-            # Send bundle through gate as Module message
-            bundle_b64 = base64.b64encode(bundle.data).decode()
+            # Try name-only first (gate may have module baked in)
             await self._remote_runner.protocol.send_message(
                 gate.gate_process.stdin,
                 "Module",
                 {
-                    "module": bundle_b64,
                     "module_name": module_name,
                     "module_args": params,
                 },
@@ -950,21 +938,41 @@ class AutomationContext:
 
             response = await self._remote_runner.protocol.read_message(gate.gate_process.stdout)
 
+            if response is not None and response[0] == "ModuleNotFound":
+                # Module not in gate — build bundle and retry
+                from ftl2.module_loading.bundle import build_bundle_from_fqcn
+                import base64
+
+                if "." not in module_name:
+                    fqcn = f"ansible.builtin.{module_name}"
+                else:
+                    fqcn = module_name
+
+                bundle = build_bundle_from_fqcn(fqcn)
+                bundle_b64 = base64.b64encode(bundle.data).decode()
+                await self._remote_runner.protocol.send_message(
+                    gate.gate_process.stdin,
+                    "Module",
+                    {
+                        "module": bundle_b64,
+                        "module_name": module_name,
+                        "module_args": params,
+                    },
+                )
+                response = await self._remote_runner.protocol.read_message(gate.gate_process.stdout)
+
             if response is None:
                 result_data = {"failed": True, "msg": "No response from gate"}
             else:
                 msg_type, data = response
                 if msg_type == "ModuleResult":
                     # Parse the stdout as JSON (Ansible module output)
-                    import json
                     stdout = data.get("stdout", "")
                     stderr = data.get("stderr", "")
                     try:
                         result_data = json.loads(stdout) if stdout.strip() else {}
-                        # Include stderr in result for debugging
                         if stderr:
                             result_data["_stderr"] = stderr
-                        # If result is empty, treat as failure
                         if not result_data:
                             result_data = {
                                 "failed": True,
