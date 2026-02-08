@@ -68,6 +68,8 @@ async def automation(
     auto_install_deps: bool = False,
     record_deps: bool = False,
     deps_file: str = ".ftl2-deps.txt",
+    modules_file: str = ".ftl2-modules.txt",
+    gate_modules: "list[str] | str | None" = None,
     state_file: str | None = None,
 ) -> AsyncGenerator[AutomationContext, None]:
     """Create an automation context for running FTL modules.
@@ -115,6 +117,12 @@ async def automation(
                     for development to capture all needed packages.
         deps_file: Path to write recorded dependencies. Default is
                   ".ftl2-deps.txt". Only used when record_deps=True.
+        modules_file: Path to write recorded module names. Default is
+                     ".ftl2-modules.txt". Only used when record_deps=True.
+        gate_modules: Modules to bake into the gate for remote execution.
+                     Accepts a list of module names, "auto" to read from
+                     modules_file (or record on first run), or None for
+                     per-task module transfer (default).
         state_file: Path to state file for persistent host/resource tracking.
                    When enabled, add_host() persists to state file immediately,
                    and hosts are loaded from state on context enter. Enables
@@ -219,6 +227,8 @@ async def automation(
         auto_install_deps=auto_install_deps,
         record_deps=record_deps,
         deps_file=deps_file,
+        modules_file=modules_file,
+        gate_modules=gate_modules,
         state_file=state_file,
     )
 

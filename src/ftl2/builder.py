@@ -8,17 +8,19 @@ Usage:
     ftl-gate-builder [options]
 
 Options:
-    -m, --module        Module to include (can be specified multiple times)
-    -M, --module-dir    Module directory to search (can be specified multiple times)
-    -r, --requirements  Python requirements file (can be specified multiple times)
-    -I, --interpreter   Python interpreter for target system (default: /usr/bin/python3)
-    -c, --cache-dir     Cache directory for built gates (default: ~/.ftl)
-    -v, --verbose       Show verbose logging
-    -d, --debug         Show debug logging
+    -m, --module            Module to include (can be specified multiple times)
+    -f, --from-modules-file Read module names from file (one per line)
+    -M, --module-dir        Module directory to search (can be specified multiple times)
+    -r, --requirements      Python requirements file (can be specified multiple times)
+    -I, --interpreter       Python interpreter for target system (default: /usr/bin/python3)
+    -c, --cache-dir         Cache directory for built gates (default: ~/.ftl)
+    -v, --verbose           Show verbose logging
+    -d, --debug             Show debug logging
 
 Examples:
     ftl-gate-builder -m ping -m setup -M /opt/modules
-    ftl-gate-builder -m custom_module -r requirements.txt -M ./modules
+    ftl-gate-builder -f .ftl2-modules.txt
+    ftl-gate-builder -f .ftl2-modules.txt -m extra_module -r requirements.txt
     ftl-gate-builder -m module -I /opt/python3.9/bin/python --debug
 """
 
@@ -35,6 +37,7 @@ logger = logging.getLogger("builder")
 
 @click.command()
 @click.option("--module", "-m", multiple=True, help="Module to include (repeatable)")
+@click.option("--from-modules-file", "-f", default=None, help="Read module names from file (one per line, e.g. .ftl2-modules.txt)")
 @click.option("--module-dir", "-M", multiple=True, help="Module search directory (repeatable)")
 @click.option("--requirements", "-r", multiple=True, help="Requirements file (repeatable)")
 @click.option("--interpreter", "-I", default="/usr/bin/python3", help="Target Python interpreter")
@@ -43,6 +46,7 @@ logger = logging.getLogger("builder")
 @click.option("--debug", "-d", is_flag=True, help="Debug logging")
 def main(
     module: tuple[str, ...],
+    from_modules_file: str | None,
     module_dir: tuple[str, ...],
     requirements: tuple[str, ...],
     interpreter: str,
@@ -55,6 +59,33 @@ def main(
         logging.basicConfig(level=logging.DEBUG)
     elif verbose:
         logging.basicConfig(level=logging.INFO)
+
+    # Collect modules from -m flags and --from-modules-file
+    modules = list(module)
+    if from_modules_file:
+        modules_path = Path(from_modules_file)
+        if not modules_path.exists():
+            raise click.ClickException(f"Modules file not found: {from_modules_file}")
+        text = modules_path.read_text().strip()
+        if text:
+            file_modules = [
+                line.strip() for line in text.splitlines()
+                if line.strip() and not line.strip().startswith("#")
+            ]
+            modules.extend(file_modules)
+            click.echo(f"Loaded {len(file_modules)} modules from {from_modules_file}")
+
+    if not modules:
+        raise click.ClickException("No modules specified. Use -m or -f to specify modules.")
+
+    # Deduplicate while preserving order
+    seen: set[str] = set()
+    unique_modules: list[str] = []
+    for m in modules:
+        if m not in seen:
+            seen.add(m)
+            unique_modules.append(m)
+    modules = unique_modules
 
     # Parse requirements files
     dependencies: list[str] = []
@@ -72,7 +103,7 @@ def main(
             module_dirs.append(str(builtin_modules))
 
     config = GateBuildConfig(
-        modules=list(module),
+        modules=modules,
         module_dirs=module_dirs,
         dependencies=dependencies,
         interpreter=interpreter,

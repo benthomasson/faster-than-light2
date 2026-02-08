@@ -253,6 +253,8 @@ class AutomationContext:
         auto_install_deps: bool = False,
         record_deps: bool = False,
         deps_file: str | Path = ".ftl2-deps.txt",
+        modules_file: str | Path = ".ftl2-modules.txt",
+        gate_modules: list[str] | str | None = None,
         state_file: str | Path | None = None,
     ):
         """Initialize the automation context.
@@ -292,10 +294,17 @@ class AutomationContext:
                 using uv when an Ansible module requires packages that aren't
                 installed. Default is False (report error with install instructions).
             record_deps: Record module dependencies during execution and write
-                to deps_file on context exit. Use with auto_install_deps for
+                to deps_file on context exit. Also writes module names to
+                modules_file for gate building. Use with auto_install_deps for
                 development, then use the generated file for production builds.
             deps_file: Path to write recorded dependencies. Default is
                 ".ftl2-deps.txt". Only used when record_deps=True.
+            modules_file: Path to write recorded module names. Default is
+                ".ftl2-modules.txt". Only used when record_deps=True.
+            gate_modules: Modules to bake into the gate for remote execution.
+                Accepts a list of module names, "auto" to read from
+                modules_file (or record on first run), or None for
+                per-task module transfer (default).
             state_file: Path to state file for persisting dynamic hosts and
                 resources. When enabled, add_host() writes to state file
                 immediately, and hosts are loaded from state on context enter.
@@ -324,6 +333,9 @@ class AutomationContext:
         self.auto_install_deps = auto_install_deps
         self._record_deps = record_deps
         self._deps_file = Path(deps_file)
+        self._modules_file = Path(modules_file)
+        self._gate_modules_input = gate_modules
+        self._gate_modules: list[str] | None = None  # resolved in __aenter__
         self._recorded_modules: set[str] = set()
         self._proxy = ModuleProxy(self)
         self._results: list[ExecuteResult] = []
@@ -1038,6 +1050,7 @@ class AutomationContext:
         context = ExecutionContext(
             execution_config=ExecutionConfig(
                 module_name="ping",
+                modules=self._gate_modules or [],
                 dry_run=self.check_mode,
             ),
             gate_config=GateConfig(),
@@ -1078,7 +1091,41 @@ class AutomationContext:
 
         self._remote_runner = RemoteModuleRunner()
         self._remote_runner.gate_builder = GateBuilder()
+        self._resolve_gate_modules()
+        self._start_time = time.time()
         return self
+
+    def _resolve_gate_modules(self) -> None:
+        """Resolve gate_modules parameter into a concrete module list.
+
+        - None: no pre-built gate (per-task transfer, current behavior)
+        - list[str]: use these modules for gate building
+        - "auto": read from modules_file if it exists, otherwise
+          enable recording so the file is written on first run
+        """
+        if self._gate_modules_input is None:
+            self._gate_modules = None
+        elif isinstance(self._gate_modules_input, list):
+            self._gate_modules = list(self._gate_modules_input)
+        elif self._gate_modules_input == "auto":
+            if self._modules_file.exists():
+                text = self._modules_file.read_text().strip()
+                if text:
+                    self._gate_modules = text.splitlines()
+                    if not self.quiet:
+                        print(f"Loaded {len(self._gate_modules)} modules from {self._modules_file}")
+                else:
+                    self._gate_modules = None
+            else:
+                # First run — enable recording so the file gets written on exit
+                self._record_deps = True
+                self._gate_modules = None
+                if not self.quiet:
+                    print(f"No {self._modules_file} found, recording modules for next run")
+        else:
+            raise ValueError(
+                f"gate_modules must be a list, 'auto', or None, got: {self._gate_modules_input!r}"
+            )
 
     async def __aexit__(
         self,
@@ -1102,9 +1149,10 @@ class AutomationContext:
                 host = getattr(error, "host", "localhost") or "localhost"
                 print(f"  {error.module} on {host}: {error.error}")
 
-        # Write recorded dependencies if enabled
+        # Write recorded dependencies and module list if enabled
         if self._record_deps and self._recorded_modules:
             self._write_recorded_deps()
+            self._write_recorded_modules()
 
         # Close gate connections
         if self._remote_runner:
@@ -1149,6 +1197,18 @@ class AutomationContext:
             self._deps_file.write_text("\n".join(lines) + "\n")
             if not self.quiet:
                 print(f"\nRecorded dependencies saved to {self._deps_file}")
+
+    def _write_recorded_modules(self) -> None:
+        """Write recorded module names to file for gate building.
+
+        Writes one module name per line, using FQCNs for collection modules.
+        This file can be used by ftl-gate-builder to build a gate with
+        all needed modules baked in, eliminating per-task bundle transfers.
+        """
+        lines = sorted(self._recorded_modules)
+        self._modules_file.write_text("\n".join(lines) + "\n")
+        if not self.quiet:
+            print(f"Recorded modules saved to {self._modules_file}")
 
     @staticmethod
     def _parse_requirement(req: str) -> tuple[str, str]:

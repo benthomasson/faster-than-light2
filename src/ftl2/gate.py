@@ -314,7 +314,10 @@ class GateBuilder:
                 module_path = resolve_fqcn(fqcn)
                 logger.debug(f"Resolved {module} via FQCN {fqcn} to {module_path}")
             except Exception as e:
-                raise ModuleNotFound(f"Cannot find {module}: {e}") from e
+                # Module may be FTL-only (e.g. swap) — no Ansible equivalent.
+                # Skip it; it will be sent via FTLModule message at runtime.
+                logger.debug(f"Skipping {module}: not found as Ansible module ({e})")
+                continue
 
             # Copy module directly into gate
             target_name = f"{module_path_name(fqcn)}.py"
