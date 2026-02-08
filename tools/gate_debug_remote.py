@@ -137,7 +137,7 @@ async def run(args: argparse.Namespace) -> None:
 
         print(f"{format_response(*response)}")
         print()
-        print("Commands: hello, info, list, shutdown, module <name> [args_json], raw <json>, quit")
+        print("Commands: hello, info, list, watch <path>, unwatch <path>, listen, shutdown, module <name> [args_json], raw <json>, quit")
         print()
 
         # Interactive loop
@@ -164,6 +164,34 @@ async def run(args: argparse.Namespace) -> None:
 
                 elif cmd == "list":
                     msg = encode_message("ListModules", {})
+
+                elif cmd == "watch":
+                    path = parts[1].strip() if len(parts) > 1 else ""
+                    if not path:
+                        print("Usage: watch <path>")
+                        continue
+                    msg = encode_message("Watch", {"path": path})
+
+                elif cmd == "unwatch":
+                    path = parts[1].strip() if len(parts) > 1 else ""
+                    if not path:
+                        print("Usage: unwatch <path>")
+                        continue
+                    msg = encode_message("Unwatch", {"path": path})
+
+                elif cmd == "listen":
+                    print("Listening for events (Ctrl+C to stop)...")
+                    try:
+                        while True:
+                            response = await read_response(process.stdout)
+                            if response:
+                                print(format_response(*response))
+                            else:
+                                print("<< Connection closed")
+                                break
+                    except KeyboardInterrupt:
+                        print("\nStopped listening.")
+                    continue
 
                 elif cmd == "shutdown":
                     process.stdin.write(encode_message("Shutdown", {}))
@@ -210,7 +238,7 @@ async def run(args: argparse.Namespace) -> None:
 
                 else:
                     print(f"Unknown command: {cmd}")
-                    print("Commands: hello, info, list, shutdown, module <name> [args_json], raw <json>, quit")
+                    print("Commands: hello, info, list, watch <path>, unwatch <path>, listen, shutdown, module <name> [args_json], raw <json>, quit")
                     continue
 
                 process.stdin.write(msg)

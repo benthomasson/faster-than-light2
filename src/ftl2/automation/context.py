@@ -346,6 +346,7 @@ class AutomationContext:
         self._gate_subsystem = gate_subsystem
         self._recorded_modules: set[str] = set()
         self._record_file = Path(record) if record else None
+        self._event_handlers: dict[str, dict[str, list]] = {}  # host -> event_type -> [handlers]
         self._proxy = ModuleProxy(self)
         self._results: list[ExecuteResult] = []
         self._hosts_proxy: HostsProxy | None = None
@@ -751,6 +752,138 @@ class AutomationContext:
         if self._on_event is not None:
             event["timestamp"] = time.time()
             self._on_event(event)
+
+    # =========================================================================
+    # Gate Event Infrastructure
+    # =========================================================================
+
+    def _register_event_handler(
+        self, target: str, event_type: str, handler: Any
+    ) -> None:
+        """Register an event handler for a host and event type.
+
+        Args:
+            target: Host name or group name
+            event_type: Event type string (e.g., "FileChanged")
+            handler: Callback function (sync or async)
+        """
+        if target not in self._event_handlers:
+            self._event_handlers[target] = {}
+        if event_type not in self._event_handlers[target]:
+            self._event_handlers[target][event_type] = []
+        self._event_handlers[target][event_type].append(handler)
+
+    async def _dispatch_event(
+        self, host_name: str, event_type: str, data: dict[str, Any]
+    ) -> None:
+        """Dispatch an event to registered handlers.
+
+        Args:
+            host_name: Host that emitted the event
+            event_type: Event type string
+            data: Event data from the gate
+        """
+        import asyncio as _asyncio
+
+        handlers = self._event_handlers.get(host_name, {}).get(event_type, [])
+        for handler in handlers:
+            if _asyncio.iscoroutinefunction(handler):
+                await handler(data)
+            else:
+                handler(data)
+
+        # Also emit through the general on_event callback
+        self._emit_event({
+            "event": event_type,
+            "host": host_name,
+            **data,
+        })
+
+    async def _send_gate_command(
+        self, host: "HostConfig", msg_type: str, data: dict[str, Any]
+    ) -> tuple[str, Any]:
+        """Send a protocol-level command to a host's gate and read the response.
+
+        Handles interleaved event messages — if an event arrives while
+        waiting for a response, it is dispatched and reading continues.
+
+        Args:
+            host: Target host configuration
+            msg_type: Message type to send
+            data: Message data
+
+        Returns:
+            Tuple of (response_type, response_data)
+        """
+        from ftl2.message import GateProtocol
+
+        gate = await self._get_or_create_gate(host)
+
+        await self._remote_runner.protocol.send_message(
+            gate.gate_process.stdin, msg_type, data
+        )
+
+        while True:
+            response = await self._remote_runner.protocol.read_message(
+                gate.gate_process.stdout
+            )
+            if response is None:
+                raise ConnectionError(f"Gate connection closed for {host.name}")
+
+            resp_type, resp_data = response
+
+            # If this is an event message, dispatch it and keep reading
+            if resp_type in GateProtocol.EVENT_TYPES:
+                await self._dispatch_event(host.name, resp_type, resp_data)
+                continue
+
+            # Cache gate back for reuse
+            self._remote_runner.gate_cache[host.name] = gate
+            return resp_type, resp_data
+
+    async def listen(self, timeout: float | None = None) -> None:
+        """Listen for events from all active gate connections.
+
+        Reads event messages from gates and dispatches them to
+        registered handlers. Blocks until timeout expires or all
+        gate connections close.
+
+        Args:
+            timeout: Maximum time in seconds to listen, or None for
+                indefinite (until cancelled or connections close).
+        """
+        import asyncio as _asyncio
+        from ftl2.message import GateProtocol
+
+        if self._remote_runner is None:
+            return
+
+        gates = dict(self._remote_runner.gate_cache)
+        if not gates:
+            return
+
+        async def _listen_one(host_name: str, gate: "Gate") -> None:
+            while True:
+                msg = await self._remote_runner.protocol.read_message(
+                    gate.gate_process.stdout
+                )
+                if msg is None:
+                    break
+                msg_type, data = msg
+                if msg_type in GateProtocol.EVENT_TYPES:
+                    await self._dispatch_event(host_name, msg_type, data)
+
+        tasks = [_listen_one(name, gate) for name, gate in gates.items()]
+
+        try:
+            if timeout is not None:
+                await _asyncio.wait_for(
+                    _asyncio.gather(*tasks), timeout=timeout
+                )
+            else:
+                await _asyncio.gather(*tasks)
+        except _asyncio.TimeoutError:
+            pass
 
     def _log_result(
         self, module_name: str, result: ExecuteResult, duration: float | None = None

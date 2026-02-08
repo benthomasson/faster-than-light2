@@ -97,6 +97,7 @@ class GateBuildConfig:
             ftl2_dir = Path(ftl2.__file__).parent
             for source_file in [
                 ftl2_dir / "ftl_gate" / "__main__.py",
+                ftl2_dir / "ftl_gate" / "inotify_simple.py",
                 ftl2_dir / "message.py",
                 ftl2_dir / "ftl_modules" / "exceptions.py",
             ]:
@@ -226,6 +227,9 @@ class GateBuilder:
 
             # Copy FTL module exceptions (needed by FTL modules sent via FTLModule messages)
             self._copy_ftl_module_exceptions(ftl2_dir)
+
+            # Copy inotify_simple for file watching support
+            self._copy_inotify_simple(gate_dir)
 
             # Install modules and their ansible dependencies
             if config.modules:
@@ -444,6 +448,31 @@ class GateBuilder:
 
         except Exception as e:
             logger.warning(f"Failed to copy ftl_modules exceptions: {e}")
+
+    def _copy_inotify_simple(self, gate_dir: Path) -> None:
+        """Copy vendored inotify_simple into gate for file watching.
+
+        Placed at the top level of the gate directory so
+        ``import inotify_simple`` works inside the .pyz.
+
+        Args:
+            gate_dir: Top-level gate directory
+        """
+        try:
+            import ftl2
+
+            ftl2_package_dir = Path(ftl2.__file__).parent
+            inotify_path = ftl2_package_dir / "ftl_gate" / "inotify_simple.py"
+
+            if not inotify_path.exists():
+                logger.warning(f"inotify_simple.py not found at {inotify_path}")
+                return
+
+            shutil.copy(inotify_path, gate_dir / "inotify_simple.py")
+            logger.debug(f"Copied inotify_simple to {gate_dir}")
+
+        except Exception as e:
+            logger.warning(f"Failed to copy inotify_simple: {e}")
 
     def _install_dependencies(self, config: GateBuildConfig, gate_dir: Path, tempdir: Path) -> None:
         """Install Python dependencies into gate using pip.

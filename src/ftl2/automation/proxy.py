@@ -692,6 +692,60 @@ class HostScopedProxy:
             "stderr_lines": stderr.splitlines(),
         }
 
+    async def watch(self, path: str) -> dict[str, Any]:
+        """Watch a file or directory for changes on the remote host.
+
+        Registers an inotify watch via the gate. File change events
+        are delivered through handlers registered with ``on()`` and
+        received during ``ftl.listen()``.
+
+        Args:
+            path: Absolute path to watch on the remote host
+
+        Returns:
+            dict with 'path' and 'status' ("ok" or "error")
+
+        Example:
+            await ftl.webserver.watch(path="/etc/nginx/nginx.conf")
+            ftl.webserver.on("FileChanged", lambda e: print(e))
+            await ftl.listen(timeout=60)
+        """
+        host_configs = await self._get_host_configs()
+        if not host_configs:
+            raise ValueError(f"No hosts found for target: {self._target}")
+
+        host_config = host_configs[0]
+        resp_type, resp_data = await self._context._send_gate_command(
+            host_config, "Watch", {"path": path}
+        )
+
+        if resp_type == "WatchResult":
+            if resp_data.get("status") == "error":
+                raise RuntimeError(
+                    f"Watch failed for {path}: {resp_data.get('message', 'unknown error')}"
+                )
+            return resp_data
+        elif resp_type == "Error":
+            raise RuntimeError(resp_data.get("message", "Watch failed"))
+        else:
+            raise RuntimeError(f"Unexpected response to Watch: {resp_type}")
+
+    def on(self, event_type: str, handler: Any) -> None:
+        """Register an event handler for this host/group.
+
+        Args:
+            event_type: Event type to handle (e.g., "FileChanged")
+            handler: Callback function. Receives event data dict.
+                Can be sync or async.
+
+        Example:
+            def on_change(event):
+                print(f"File {event['path']} was {event['event']}")
+
+            ftl.webserver.on("FileChanged", on_change)
+        """
+        self._context._register_event_handler(self._target, event_type, handler)
+
     def __getattr__(self, name: str) -> "HostScopedModuleProxy":
         """Return a module proxy scoped to this host/group.
 

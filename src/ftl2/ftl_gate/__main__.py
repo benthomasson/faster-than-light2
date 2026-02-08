@@ -497,6 +497,145 @@ async def execute_ftl_module(
 
 
 # =============================================================================
+# =============================================================================
+# File Watcher
+# =============================================================================
+
+
+class FileWatcher:
+    """Watches files for changes using Linux inotify and emits FileChanged events.
+
+    Runs an asyncio background task that monitors inotify file descriptors
+    and writes FileChanged messages to the gate's stdout. The inotify
+    library is loaded lazily on first watch to avoid import errors on
+    non-Linux systems.
+    """
+
+    # Map inotify flag bits to human-readable event names
+    _FLAG_NAMES = {
+        0x00000002: "modified",
+        0x00000004: "attrib",
+        0x00000008: "close_write",
+        0x00000040: "moved_from",
+        0x00000080: "moved_to",
+        0x00000100: "created",
+        0x00000200: "deleted",
+        0x00000400: "delete_self",
+        0x00000800: "move_self",
+        0x00008000: "ignored",
+    }
+
+    def __init__(self, protocol, writer):
+        self._protocol = protocol
+        self._writer = writer
+        self._inotify = None
+        self._watches = {}  # wd -> path
+        self._task = None
+
+    def add_watch(self, path: str) -> None:
+        """Add a file watch. Starts the background event loop on first call."""
+        if self._inotify is None:
+            from inotify_simple import INotify, flags as iflags
+
+            self._inotify = INotify(nonblocking=True)
+            self._task = asyncio.create_task(self._event_loop())
+            self._iflags = iflags
+
+        watch_mask = (
+            self._iflags.MODIFY
+            | self._iflags.ATTRIB
+            | self._iflags.CLOSE_WRITE
+            | self._iflags.MOVED_FROM
+            | self._iflags.MOVED_TO
+            | self._iflags.CREATE
+            | self._iflags.DELETE
+            | self._iflags.DELETE_SELF
+            | self._iflags.MOVE_SELF
+        )
+        wd = self._inotify.add_watch(path, watch_mask)
+        self._watches[wd] = path
+        logger.info(f"Watching {path} (wd={wd})")
+
+    def remove_watch(self, path: str) -> bool:
+        """Remove a file watch by path. Returns True if found."""
+        for wd, watched_path in list(self._watches.items()):
+            if watched_path == path:
+                try:
+                    self._inotify.rm_watch(wd)
+                except OSError:
+                    pass  # Already removed by kernel
+                del self._watches[wd]
+                logger.info(f"Unwatched {path} (wd={wd})")
+                return True
+        return False
+
+    async def _event_loop(self) -> None:
+        """Background task that reads inotify events and emits FileChanged messages."""
+        loop = asyncio.get_event_loop()
+        fd = self._inotify.fileno()
+
+        try:
+            while True:
+                # Wait for the inotify fd to become readable
+                readable = asyncio.Event()
+                loop.add_reader(fd, readable.set)
+                try:
+                    await readable.wait()
+                finally:
+                    loop.remove_reader(fd)
+
+                # Read all pending events
+                for event in self._inotify.read(timeout=0):
+                    path = self._watches.get(event.wd)
+                    if path is None:
+                        continue
+
+                    event_name = self._mask_to_name(event.mask)
+
+                    # Handle watch removal by kernel (file deleted, fs unmounted)
+                    if event.mask & 0x00008000:  # IGNORED
+                        self._watches.pop(event.wd, None)
+                        logger.info(f"Watch removed by kernel for {path}")
+
+                    try:
+                        await self._protocol.send_message(
+                            self._writer,
+                            "FileChanged",
+                            {
+                                "path": path,
+                                "event": event_name,
+                                "name": event.name,
+                            },
+                        )
+                    except BrokenPipeError:
+                        return
+        except asyncio.CancelledError:
+            return
+        except Exception as e:
+            logger.error(f"FileWatcher error: {e}")
+
+    def _mask_to_name(self, mask: int) -> str:
+        """Convert inotify event mask to a human-readable name."""
+        for flag_val, name in self._FLAG_NAMES.items():
+            if mask & flag_val:
+                return name
+        return f"unknown(0x{mask:x})"
+
+    def stop(self) -> None:
+        """Cancel the background task and close inotify."""
+        if self._task is not None:
+            self._task.cancel()
+            self._task = None
+        if self._inotify is not None:
+            try:
+                self._inotify.close()
+            except Exception:
+                pass
+            self._inotify = None
+        self._watches.clear()
+
+
+# =============================================================================
 # Main Entry Point
 # =============================================================================
 
@@ -549,6 +688,9 @@ async def main(args: list[str]) -> int | None:
     # Initialize protocol
     protocol = GateProtocol()
 
+    # Initialize file watcher (events are emitted concurrently)
+    watcher = FileWatcher(protocol, writer)
+
     # Message processing loop
     while True:
         try:
@@ -557,6 +699,7 @@ async def main(args: list[str]) -> int | None:
 
             if msg is None:
                 logger.info("EOF received, shutting down")
+                watcher.stop()
                 try:
                     await protocol.send_message(writer, "Goodbye", {})
                 except Exception:
@@ -648,8 +791,44 @@ async def main(args: list[str]) -> int | None:
                     writer, "ListModulesResult", {"modules": modules}
                 )
 
+            elif msg_type == "Watch":
+                path = data.get("path", "") if isinstance(data, dict) else ""
+                logger.info(f"Watch requested: {path}")
+                try:
+                    watcher.add_watch(path)
+                    await protocol.send_message(
+                        writer, "WatchResult", {"path": path, "status": "ok"}
+                    )
+                except ImportError:
+                    await protocol.send_message(
+                        writer,
+                        "WatchResult",
+                        {
+                            "path": path,
+                            "status": "error",
+                            "message": "inotify not available (Linux only)",
+                        },
+                    )
+                except Exception as e:
+                    await protocol.send_message(
+                        writer,
+                        "WatchResult",
+                        {"path": path, "status": "error", "message": str(e)},
+                    )
+
+            elif msg_type == "Unwatch":
+                path = data.get("path", "") if isinstance(data, dict) else ""
+                logger.info(f"Unwatch requested: {path}")
+                found = watcher.remove_watch(path)
+                await protocol.send_message(
+                    writer,
+                    "UnwatchResult",
+                    {"path": path, "removed": found},
+                )
+
             elif msg_type == "Shutdown":
                 logger.info("Shutdown requested")
+                watcher.stop()
                 await protocol.send_message(writer, "Goodbye", {})
                 return None
 

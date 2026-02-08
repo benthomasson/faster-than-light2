@@ -42,6 +42,15 @@ class GateProtocol:
         "ModuleNotFound",  # Module not in bundle
         "Error",  # Generic error
         "GateSystemError",  # Unhandled exception
+        "Watch",  # Subscribe to file change events
+        "WatchResult",  # Response to Watch request
+        "Unwatch",  # Unsubscribe from file change events
+        "UnwatchResult",  # Response to Unwatch request
+        "FileChanged",  # Unsolicited file change event
+    }
+
+    EVENT_TYPES = {
+        "FileChanged",
     }
 
     async def send_message(

@@ -1048,11 +1048,14 @@ class RemoteModuleRunner(ModuleRunner):
         """
         import os
         dest = self.GATE_SUBSYSTEM_PATH
+        tmp_dest = dest + ".tmp"
         try:
             await conn.run(f"mkdir -p {os.path.dirname(dest)}", check=True)
             async with conn.start_sftp_client() as sftp:
-                await sftp.put(gate_local_path, dest)
-            await conn.run(f"chmod 755 {dest}", check=True)
+                await sftp.put(gate_local_path, tmp_dest)
+            await conn.run(f"chmod 755 {tmp_dest}", check=True)
+            # Atomic rename — running gate keeps its fd to the old inode
+            await conn.run(f"mv {tmp_dest} {dest}", check=True)
             logger.info(f"Updated gate at {dest}")
         except Exception as e:
             logger.warning(f"Failed to update gate at stable path: {e}")
@@ -1099,10 +1102,12 @@ class RemoteModuleRunner(ModuleRunner):
             remote_size = int(result.stdout.strip())
 
             if remote_size != local_size:
-                # Upload gate to stable path
+                # Upload gate to stable path (atomic rename to avoid corrupting running gate)
+                tmp_dest = dest + ".tmp"
                 async with conn.start_sftp_client() as sftp:
-                    await sftp.put(gate_local_path, dest)
-                await conn.run(f"chmod 755 {dest}", check=True)
+                    await sftp.put(gate_local_path, tmp_dest)
+                await conn.run(f"chmod 755 {tmp_dest}", check=True)
+                await conn.run(f"mv {tmp_dest} {dest}", check=True)
                 logger.info(f"Uploaded gate to {dest}")
             else:
                 logger.info(f"Gate at {dest} is up to date")
