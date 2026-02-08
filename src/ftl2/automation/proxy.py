@@ -199,31 +199,37 @@ class HostScopedProxy:
             # For local/localhost, use local execution
             if self._target in ("local", "localhost"):
                 result = await self._context.execute("command", {"cmd": "echo pong"})
-            else:
-                # For remote hosts, run through the full gate pipeline
-                results = await self._context.run_on(self._target, "command", cmd="echo pong")
-                if not results:
+                stdout = result.get("stdout", "").strip()
+                if stdout != "pong":
                     raise FTL2ConnectionError(
-                        f"Ping failed: no response from {self._target}"
+                        f"Ping failed: unexpected response '{stdout}'"
                     )
-                result = results[0]
-
-                if not result.success:
-                    raise FTL2ConnectionError(
-                        f"Ping failed on {self._target}: {result.error}"
-                    )
-
-                # Extract output from ExecuteResult
-                result = result.output
-
-            # Verify we got the expected response
-            stdout = result.get("stdout", "").strip()
-            if stdout == "pong":
                 return {"ping": "pong"}
-            else:
+
+            # For remote hosts, run through the full gate pipeline
+            results = await self._context.run_on(self._target, "command", cmd="echo pong")
+            if not results:
                 raise FTL2ConnectionError(
-                    f"Ping failed: unexpected response '{stdout}'"
+                    f"Ping failed: no response from {self._target}"
                 )
+
+            # Check all results (supports both single hosts and groups)
+            failed = []
+            for r in results:
+                if not r.success:
+                    failed.append(f"{r.host}: {r.error}")
+                else:
+                    stdout = r.output.get("stdout", "").strip()
+                    if stdout != "pong":
+                        failed.append(f"{r.host}: unexpected response '{stdout}'")
+
+            if failed:
+                raise FTL2ConnectionError(
+                    f"Ping failed on {len(failed)}/{len(results)} host(s): "
+                    + "; ".join(failed)
+                )
+
+            return {"ping": "pong"}
 
         except TimeoutError:
             raise
