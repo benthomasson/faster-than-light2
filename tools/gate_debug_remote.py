@@ -8,6 +8,7 @@ Usage:
     python tools/gate_debug_remote.py <gate.pyz> <host> [options]
 
 Options:
+    -s, --subsystem Connect via SSH subsystem (no gate upload needed)
     -u, --user      SSH username (default: current user)
     -p, --port      SSH port (default: 22)
     -i, --identity  SSH private key file
@@ -16,7 +17,7 @@ Options:
 Examples:
     python tools/gate_debug_remote.py ~/.ftl/ftl_gate_abc.pyz myhost
     python tools/gate_debug_remote.py ~/.ftl/ftl_gate_abc.pyz myhost -u admin -p 2222
-    python tools/gate_debug_remote.py ~/.ftl/ftl_gate_abc.pyz myhost -I /usr/bin/python3.11
+    python tools/gate_debug_remote.py -s myhost -u root
 """
 
 import argparse
@@ -66,10 +67,14 @@ async def read_response(reader) -> tuple[str, dict] | None:
 async def run(args: argparse.Namespace) -> None:
     import asyncssh
 
-    gate_path = Path(args.gate).expanduser().resolve()
-    if not gate_path.exists():
-        print(f"Gate file not found: {gate_path}")
-        sys.exit(1)
+    if not args.subsystem:
+        if not args.gate:
+            print("Gate file path required (or use -s for subsystem)")
+            sys.exit(1)
+        gate_path = Path(args.gate).expanduser().resolve()
+        if not gate_path.exists():
+            print(f"Gate file not found: {gate_path}")
+            sys.exit(1)
 
     # Build SSH connection options
     connect_kwargs: dict = {
@@ -84,30 +89,43 @@ async def run(args: argparse.Namespace) -> None:
     print(f"Connecting to {args.user}@{args.host}:{args.port}...")
 
     async with asyncssh.connect(**connect_kwargs) as conn:
-        # Upload gate via SFTP
-        remote_gate = f"/tmp/{gate_path.name}"
-        print(f"Uploading gate to {remote_gate}...")
+        if args.subsystem:
+            # Connect via SSH subsystem — no upload needed
+            print("Connecting via SSH subsystem 'ftl2-gate'...")
+            try:
+                process = await conn.create_process(
+                    subsystem="ftl2-gate", encoding=None
+                )
+            except asyncssh.ChannelOpenError:
+                print("Subsystem 'ftl2-gate' not registered on remote host.")
+                print("Register it first with gate_subsystem=True, or run without -s.")
+                sys.exit(1)
+            print("Connected via subsystem.")
+        else:
+            # Upload gate via SFTP
+            remote_gate = f"/tmp/{gate_path.name}"
+            print(f"Uploading gate to {remote_gate}...")
 
-        async with conn.start_sftp_client() as sftp:
-            needs_upload = True
-            if await sftp.exists(remote_gate):
-                remote_stat = await sftp.lstat(remote_gate)
-                local_size = gate_path.stat().st_size
-                if remote_stat.size == local_size:
-                    print("Gate already exists on remote, reusing.")
-                    needs_upload = False
+            async with conn.start_sftp_client() as sftp:
+                needs_upload = True
+                if await sftp.exists(remote_gate):
+                    remote_stat = await sftp.lstat(remote_gate)
+                    local_size = gate_path.stat().st_size
+                    if remote_stat.size == local_size:
+                        print("Gate already exists on remote, reusing.")
+                        needs_upload = False
 
-            if needs_upload:
-                await sftp.put(str(gate_path), remote_gate)
-                await conn.run(f"chmod 700 {remote_gate}", check=True)
-                print("Upload complete.")
+                if needs_upload:
+                    await sftp.put(str(gate_path), remote_gate)
+                    await conn.run(f"chmod 700 {remote_gate}", check=True)
+                    print("Upload complete.")
 
-        # Start gate process
-        interpreter = args.interpreter
-        print(f"Starting gate: {interpreter} {remote_gate}")
-        process = await conn.create_process(
-            f"{interpreter} {remote_gate}", encoding=None
-        )
+            # Start gate process
+            interpreter = args.interpreter
+            print(f"Starting gate: {interpreter} {remote_gate}")
+            process = await conn.create_process(
+                f"{interpreter} {remote_gate}", encoding=None
+            )
 
         # Handshake
         process.stdin.write(encode_message("Hello", {}))
@@ -212,8 +230,10 @@ def main() -> None:
     import getpass
 
     parser = argparse.ArgumentParser(description="Remote FTL2 gate debugger")
-    parser.add_argument("gate", help="Path to gate .pyz file")
+    parser.add_argument("gate", nargs="?", help="Path to gate .pyz file (not needed with -s)")
     parser.add_argument("host", help="Remote host")
+    parser.add_argument("-s", "--subsystem", action="store_true",
+                        help="Connect via SSH subsystem instead of uploading gate")
     parser.add_argument("-u", "--user", default=getpass.getuser(), help="SSH username")
     parser.add_argument("-p", "--port", type=int, default=22, help="SSH port")
     parser.add_argument("-i", "--identity", help="SSH private key file")
