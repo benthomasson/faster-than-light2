@@ -412,40 +412,54 @@ async def execute_ftl_module(
         module_compiled = compile(module_source, module_name, "exec")
 
         # Execute module in isolated namespace
-        globals_dict: dict[str, Any] = {
+        # Use single dict for globals and locals to avoid exec() pitfall where
+        # module-level imports go into locals but function bodies look up in globals
+        # Use module_name (not __main__) to avoid triggering if __name__ == "__main__" blocks
+        namespace: dict[str, Any] = {
             "__file__": module_name,
-            "__name__": "__main__",
+            "__name__": f"ftl_module_{module_name}",
         }
-        locals_dict: dict[str, Any] = {}
 
-        exec(module_compiled, globals_dict, locals_dict)
+        exec(module_compiled, namespace)
 
         # Find and call entry point
-        if "main" in locals_dict:
-            main_func = locals_dict["main"]
-        elif "main" in globals_dict:
-            main_func = globals_dict["main"]
+        # Look for: main(), ftl_{module_name}(), or the first callable
+        func_name = f"ftl_{module_name}"
+        if "main" in namespace:
+            main_func = namespace["main"]
+        elif func_name in namespace:
+            main_func = namespace[func_name]
         else:
-            raise RuntimeError(f"Module {module_name} has no main() function")
+            raise RuntimeError(f"Module {module_name} has no main() or {func_name}() function")
 
-        # Call the main function
-        logger.info("Calling FTL module main()")
+        # Call the module function
+        logger.info(f"Calling FTL module {main_func.__name__}()")
+        args = module_args or {}
+
+        # Determine calling convention: main() gets dict arg, ftl_* gets kwargs
+        import inspect
+        sig = inspect.signature(main_func)
+        use_kwargs = len(sig.parameters) > 1 or (
+            len(sig.parameters) == 1
+            and list(sig.parameters.values())[0].kind != inspect.Parameter.VAR_POSITIONAL
+            and list(sig.parameters.values())[0].annotation != dict
+            and main_func.__name__ != "main"
+        )
+
         if asyncio.iscoroutinefunction(main_func):
-            # Async main - check if it accepts args
-            import inspect
-            sig = inspect.signature(main_func)
-            if len(sig.parameters) > 0:
-                result = await main_func(module_args or {})
-            else:
+            if not sig.parameters:
                 result = await main_func()
-        else:
-            # Sync main
-            import inspect
-            sig = inspect.signature(main_func)
-            if len(sig.parameters) > 0:
-                result = main_func(module_args or {})
+            elif use_kwargs:
+                result = await main_func(**args)
             else:
+                result = await main_func(args)
+        else:
+            if not sig.parameters:
                 result = main_func()
+            elif use_kwargs:
+                result = main_func(**args)
+            else:
+                result = main_func(args)
 
         # Send result
         logger.info("Sending FTLModuleResult")

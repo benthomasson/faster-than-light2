@@ -213,6 +213,9 @@ class GateBuilder:
             # Copy message protocol module
             self._copy_message_module(ftl2_dir)
 
+            # Copy FTL module exceptions (needed by FTL modules sent via FTLModule messages)
+            self._copy_ftl_module_exceptions(ftl2_dir)
+
             # Install modules and their ansible dependencies
             if config.modules:
                 self._install_modules(config, module_dir, gate_dir)
@@ -384,6 +387,37 @@ class GateBuilder:
 
         except Exception as e:
             raise GateError(f"Failed to copy message module: {e}") from e
+
+    def _copy_ftl_module_exceptions(self, ftl2_dir: Path) -> None:
+        """Copy FTL module exceptions into gate.
+
+        FTL modules sent via FTLModule messages import from
+        ftl2.ftl_modules.exceptions. This makes that import
+        available inside the gate.
+
+        Args:
+            ftl2_dir: ftl2 package directory in gate
+        """
+        try:
+            import ftl2
+
+            ftl2_package_dir = Path(ftl2.__file__).parent
+            exceptions_path = ftl2_package_dir / "ftl_modules" / "exceptions.py"
+
+            if not exceptions_path.exists():
+                logger.warning(f"ftl_modules/exceptions.py not found at {exceptions_path}")
+                return
+
+            # Create ftl_modules subpackage
+            ftl_modules_dir = ftl2_dir / "ftl_modules"
+            ftl_modules_dir.mkdir(exist_ok=True)
+            (ftl_modules_dir / "__init__.py").write_text("")
+
+            shutil.copy(exceptions_path, ftl_modules_dir / "exceptions.py")
+            logger.debug(f"Copied ftl_modules/exceptions to {ftl_modules_dir}")
+
+        except Exception as e:
+            logger.warning(f"Failed to copy ftl_modules exceptions: {e}")
 
     def _install_dependencies(self, config: GateBuildConfig, gate_dir: Path, tempdir: Path) -> None:
         """Install Python dependencies into gate using pip.

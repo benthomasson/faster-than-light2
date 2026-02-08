@@ -790,9 +790,10 @@ class AutomationContext:
         final_results: list[ExecuteResult] = []
         for i, result in enumerate(results):
             if isinstance(result, Exception):
+                error_msg = str(result) or f"{type(result).__name__}"
                 final_results.append(
                     ExecuteResult.from_error(
-                        str(result),
+                        error_msg,
                         module_name,
                         host_list[i].name,
                     )
@@ -898,16 +899,27 @@ class AutomationContext:
         if self._remote_runner is None:
             raise RuntimeError("RemoteModuleRunner not initialized - use 'async with' context manager")
 
+        ftl_attempted = False
         if is_ftl_module(module_name):
-            # FTL module - execute via FTLModule message through gate
-            source = get_ftl_module_source(module_name)
-            gate = await self._get_or_create_gate(host)
-            result_data = await self._remote_runner.run_ftl_module(
-                gate, module_name, source, params
-            )
-            # Cache gate for reuse
-            self._remote_runner.gate_cache[host.name] = gate
-        else:
+            # FTL module - try executing via FTLModule message through gate
+            try:
+                source = get_ftl_module_source(module_name)
+                gate = await self._get_or_create_gate(host)
+                result_data = await self._remote_runner.run_ftl_module(
+                    gate, module_name, source, params
+                )
+                # Cache gate for reuse
+                self._remote_runner.gate_cache[host.name] = gate
+                ftl_attempted = True
+            except Exception as e:
+                # FTL module failed (missing deps, etc.) - fall back to Ansible bundle
+                error_msg = str(e)
+                if "No module named" in error_msg or "ImportError" in error_msg:
+                    ftl_attempted = False
+                else:
+                    raise
+
+        if not ftl_attempted:
             # Ansible module - build bundle and send through gate
             from ftl2.module_loading.bundle import build_bundle_from_fqcn
             import base64
@@ -1054,8 +1066,10 @@ class AutomationContext:
     async def __aenter__(self) -> "AutomationContext":
         """Enter the async context manager."""
         from ftl2.runners import RemoteModuleRunner
+        from ftl2.gate import GateBuilder
 
         self._remote_runner = RemoteModuleRunner()
+        self._remote_runner.gate_builder = GateBuilder()
         return self
 
     async def __aexit__(
