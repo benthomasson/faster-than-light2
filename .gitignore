@@ -152,3 +152,8 @@ Thumbs.db
 .uv/
 uv.lock
 tests/ssh_test_config/
+
+# FTL2 build artifacts
+.ftl2-deps.txt
+.ftl2-modules.txt
+*.pyz
