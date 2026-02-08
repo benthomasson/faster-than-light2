@@ -671,8 +671,12 @@ class RemoteModuleRunner(ModuleRunner):
                 # Verify Python version
                 await self._check_version(conn, interpreter)
 
-                # Deploy gate executable
-                temp_dir = "/tmp"
+                # Deploy gate executable to per-user directory
+                # Using ~/.ftl avoids name collisions between users in /tmp
+                # and prevents one user's cached gate from blocking another's
+                await conn.run("mkdir -p ~/.ftl && chmod 700 ~/.ftl", check=True)
+                result = await conn.run("echo ~/.ftl", check=True)
+                temp_dir = result.stdout.strip()
                 gate_file = await self._send_gate(conn, temp_dir, interpreter, context)
 
                 # Start gate process
