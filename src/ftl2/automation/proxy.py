@@ -219,7 +219,9 @@ class HostScopedProxy:
                 if not r.success:
                     failed.append(f"{r.host}: {r.error}")
                 else:
-                    stdout = r.output.get("stdout", "").strip()
+                    # Gate wraps output under "result" key
+                    output = r.output.get("result", r.output)
+                    stdout = output.get("stdout", "").strip()
                     if stdout != "pong":
                         failed.append(f"{r.host}: unexpected response '{stdout}'")
 
