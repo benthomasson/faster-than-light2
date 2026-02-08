@@ -31,6 +31,9 @@ class ExecuteResult:
         module: Module name that was executed
         host: Host name (if remote execution)
         used_ftl: Whether FTL module was used (vs Ansible fallback)
+        params: Module parameters (excluding injected secrets)
+        duration: Execution duration in seconds
+        timestamp: Execution start time (epoch seconds)
     """
 
     success: bool
@@ -40,6 +43,9 @@ class ExecuteResult:
     module: str = ""
     host: str = "localhost"
     used_ftl: bool = True
+    params: dict[str, Any] = field(default_factory=dict)
+    duration: float = 0.0
+    timestamp: float = 0.0
 
     @classmethod
     def from_module_output(

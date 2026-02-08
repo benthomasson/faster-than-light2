@@ -256,6 +256,7 @@ class AutomationContext:
         modules_file: str | Path = ".ftl2-modules.txt",
         gate_modules: list[str] | str | None = None,
         state_file: str | Path | None = None,
+        record: str | Path | None = None,
     ):
         """Initialize the automation context.
 
@@ -310,6 +311,11 @@ class AutomationContext:
                 immediately, and hosts are loaded from state on context enter.
                 This enables crash recovery and idempotent provisioning.
                 Default is None (no state persistence).
+            record: Path to JSON file for recording all actions as an audit
+                trail. Written on context exit with timestamps, durations,
+                parameters, and results for every module execution. Secret
+                parameters (from secret_bindings) are excluded. Default is
+                None (no recording).
         """
         self._enabled_modules = modules
         self._inventory = self._load_inventory(inventory)
@@ -337,6 +343,7 @@ class AutomationContext:
         self._gate_modules_input = gate_modules
         self._gate_modules: list[str] | None = None  # resolved in __aenter__
         self._recorded_modules: set[str] = set()
+        self._record_file = Path(record) if record else None
         self._proxy = ModuleProxy(self)
         self._results: list[ExecuteResult] = []
         self._hosts_proxy: HostsProxy | None = None
@@ -678,6 +685,7 @@ class AutomationContext:
         from ftl2.ftl_modules import execute
 
         start_time = time.time()
+        original_params = params  # preserve pre-injection params for audit
 
         # Inject bound secrets (script never sees these values)
         secret_injections = self._get_secret_bindings_for_module(module_name)
@@ -702,9 +710,11 @@ class AutomationContext:
             check_mode=self.check_mode,
             auto_install_deps=self.auto_install_deps,
         )
-        self._results.append(result)
-
         duration = time.time() - start_time
+        result.params = original_params
+        result.timestamp = start_time
+        result.duration = duration
+        self._results.append(result)
 
         # Emit complete event
         self._emit_event({
@@ -826,6 +836,7 @@ class AutomationContext:
         from ftl2.ftl_modules import execute
 
         start_time = time.time()
+        original_params = params  # preserve pre-injection params for audit
 
         # Record module for dependency tracking
         if self._record_deps:
@@ -858,6 +869,9 @@ class AutomationContext:
             result.host = host.name
 
         duration = time.time() - start_time
+        result.params = original_params
+        result.timestamp = start_time
+        result.duration = duration
 
         # Emit complete event
         self._emit_event({
@@ -1175,6 +1189,10 @@ class AutomationContext:
             self._write_recorded_deps()
             self._write_recorded_modules()
 
+        # Write audit recording if enabled
+        if self._record_file and self._results:
+            self._write_recording()
+
         # Close gate connections
         if self._remote_runner:
             await self._remote_runner.close_all()
@@ -1230,6 +1248,51 @@ class AutomationContext:
         self._modules_file.write_text("\n".join(lines) + "\n")
         if not self.quiet:
             print(f"Recorded modules saved to {self._modules_file}")
+
+    def _write_recording(self) -> None:
+        """Write JSON audit trail of all actions to file.
+
+        Records every module execution with timestamps, durations,
+        parameters, and results. Secret parameters are excluded
+        (params are captured before secret injection).
+        """
+        import json
+        from datetime import datetime, timezone
+
+        def epoch_to_iso(epoch: float) -> str:
+            return datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat()
+
+        actions = []
+        for r in self._results:
+            action = {
+                "module": r.module,
+                "host": r.host,
+                "params": r.params,
+                "success": r.success,
+                "changed": r.changed,
+                "duration": round(r.duration, 3),
+                "timestamp": epoch_to_iso(r.timestamp) if r.timestamp else None,
+            }
+            if not r.success:
+                action["error"] = r.error
+            actions.append(action)
+
+        now = time.time()
+        recording = {
+            "started": epoch_to_iso(self._start_time) if self._start_time else None,
+            "completed": epoch_to_iso(now),
+            "check_mode": self.check_mode,
+            "success": not self.failed,
+            "actions": actions,
+            "errors": [
+                {"module": e.module, "host": e.host, "error": e.error}
+                for e in self.errors
+            ],
+        }
+
+        self._record_file.write_text(json.dumps(recording, indent=2) + "\n")
+        if not self.quiet:
+            print(f"Audit recording saved to {self._record_file}")
 
     @staticmethod
     def _parse_requirement(req: str) -> tuple[str, str]:

@@ -71,6 +71,7 @@ async def automation(
     modules_file: str = ".ftl2-modules.txt",
     gate_modules: "list[str] | str | None" = None,
     state_file: str | None = None,
+    record: str | None = None,
 ) -> AsyncGenerator[AutomationContext, None]:
     """Create an automation context for running FTL modules.
 
@@ -127,6 +128,9 @@ async def automation(
                    When enabled, add_host() persists to state file immediately,
                    and hosts are loaded from state on context enter. Enables
                    crash recovery and idempotent provisioning. Default is None.
+        record: Path to JSON file for recording all actions as an audit
+                trail. Written on context exit with timestamps, durations,
+                parameters (excluding secrets), and results. Default is None.
 
     Yields:
         AutomationContext with ftl.module_name() access to all modules
@@ -230,6 +234,7 @@ async def automation(
         modules_file=modules_file,
         gate_modules=gate_modules,
         state_file=state_file,
+        record=record,
     )
 
     try:
