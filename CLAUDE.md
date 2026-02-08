@@ -2,9 +2,252 @@
 
 ## What This Is
 
-FTL2 is a Python automation framework that runs Ansible modules in-process instead of as subprocesses. It provides an `async with automation()` context manager that gives Python scripts direct access to the entire Ansible module ecosystem.
+FTL2 is a Python automation framework that runs Ansible modules in-process instead of as subprocesses. It provides an `async with automation()` context manager that gives Python scripts direct access to the entire Ansible module ecosystem — 3-17x faster than `ansible-playbook`.
 
-## Project Structure
+## Installation
+
+**Preferred: Use `uv run` with PEP 723 inline metadata (no install needed):**
+
+Add this header to any script and `uv run` handles everything:
+```python
+#!/usr/bin/env python3
+# /// script
+# dependencies = [
+#     "ftl2 @ git+https://github.com/benthomasson/ftl2",
+# ]
+# requires-python = ">=3.13"
+# ///
+```
+
+Then run directly:
+```bash
+uv run my_script.py
+```
+
+**Alternative: Install the CLI tool globally:**
+```bash
+uvx --from "git+https://github.com/benthomasson/ftl2" ftl2
+```
+
+Both pull ftl2 and all dependencies (`ftl-module-utils`, `ftl-builtin-modules`, `ftl-collections`, `asyncssh`, `httpx`, etc.) directly from GitHub.
+
+## The Pattern
+
+```python
+import asyncio
+from ftl2 import automation
+
+async def main():
+    async with automation(
+        secret_bindings={
+            "community.general.linode_v4": {
+                "access_token": "LINODE_TOKEN",
+                "root_pass": "LINODE_ROOT_PASS",
+            },
+        }
+    ) as ftl:
+        await ftl.file(path="/tmp/test", state="directory")
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+## Module Names
+
+Use the same Ansible module names and parameters:
+
+```python
+# Short names for builtin modules
+await ftl.file(path="/tmp/test", state="touch")
+await ftl.copy(src="config.yml", dest="/etc/app/config.yml")
+await ftl.command(cmd="echo hello")
+await ftl.service(name="nginx", state="restarted")
+await ftl.template(src="app.conf.j2", dest="/etc/app.conf")
+
+# FQCN for collection modules
+await ftl.community.general.linode_v4(label="web01", type="g6-standard-1", ...)
+await ftl.community.general.slack(channel="#ops", msg="Done!")
+await ftl.ansible.posix.authorized_key(user="ben", key=ssh_key)
+await ftl.ansible.posix.firewalld(port="80/tcp", state="enabled")
+```
+
+## Secret Bindings
+
+Secrets are configured once and injected automatically:
+
+```python
+async with automation(
+    secret_bindings={
+        "community.general.linode_v4": {
+            "access_token": "LINODE_TOKEN",
+            "root_pass": "LINODE_ROOT_PASS",
+        },
+        "community.general.slack": {"token": "SLACK_TOKEN"},
+        "uri": {"bearer_token": "API_TOKEN"},
+    }
+) as ftl:
+    # No credentials in the code - injected from environment
+    await ftl.local.community.general.linode_v4(label="web01", ...)
+
+    # bearer_token injected automatically, redacted in audit logs
+    await ftl.local.uri(
+        url="https://api.example.com/data",
+        body={"key": "value"},
+        body_format="json",
+    )
+```
+
+## Targeting Hosts and Groups
+
+```python
+async with automation(inventory="inventory.yml") as ftl:
+    # Local execution (for cloud/API modules)
+    await ftl.local.community.general.linode_v4(label="web01", ...)
+
+    # Target a group
+    await ftl.webservers.service(name="nginx", state="restarted")
+
+    # Target a specific host
+    await ftl.db01.command(cmd="pg_dump mydb")
+```
+
+## State File Tracking
+
+```python
+async with automation(state_file=".ftl2-state.json") as ftl:
+    if ftl.state.has("web01"):
+        resource = ftl.state.get("web01")
+        print(f"Server exists: {resource['ipv4'][0]}")
+    else:
+        server = await ftl.local.community.general.linode_v4(label="web01", ...)
+        ftl.state.add("web01", {
+            "provider": "linode",
+            "id": server["instance"]["id"],
+            "ipv4": server["instance"]["ipv4"],
+        })
+        ftl.add_host(
+            hostname="web01",
+            ansible_host=server["instance"]["ipv4"][0],
+            ansible_user="root",
+            groups=["webservers"],
+        )
+```
+
+State operations:
+```python
+ftl.state.has("web01")          # Check existence
+ftl.state.get("web01")          # Get resource dict
+ftl.state.add("web01", {...})   # Add resource (persists immediately)
+ftl.state.remove("web01")       # Remove resource
+ftl.state.resources()           # List all resource names
+ftl.state.hosts()               # List all host names
+```
+
+## Return Types
+
+**Local execution** returns a `dict`:
+```python
+server = await ftl.local.community.general.linode_v4(label="web01", ...)
+ip = server["instance"]["ipv4"][0]
+```
+
+**Remote execution** returns `list[ExecuteResult]`:
+```python
+results = await ftl.webservers.command(cmd="uptime")
+for result in results:
+    print(f"{result.host}: {result.output}")
+```
+
+## Safety Features
+
+```python
+# Check mode - preview without executing
+async with automation(check_mode=True) as ftl:
+    await ftl.file(path="/etc/important", state="absent")
+
+# Fail fast - stop on first error
+async with automation(fail_fast=True) as ftl:
+    await ftl.file(...)
+```
+
+## Gate Modules (Pre-built Remote Execution)
+
+```python
+async with automation(
+    gate_modules="auto",      # Read from .ftl2-modules.txt, or record on first run
+    record_deps=True,         # Record modules to .ftl2-modules.txt
+) as ftl:
+    await ftl.webservers.dnf(name="nginx", state="present")
+```
+
+First run records modules; subsequent runs bake them into the gate for faster execution.
+
+## Audit Recording
+
+```python
+async with automation(record="audit.json") as ftl:
+    await ftl.file(path="/tmp/test", state="directory")
+# Writes audit.json with all actions, timestamps, durations
+# Secret-injected params are excluded
+```
+
+## Common Gotchas
+
+### Bootstrap python3-dnf on Fedora
+```python
+await host.command(cmd="dnf install -y python3-dnf")  # Before any dnf calls
+await host.dnf(name="nginx", state="present")
+```
+
+### `user` module: `group` vs `groups`
+```python
+# WRONG - changes primary group
+await host.user(name="ben", group="wheel")
+# RIGHT - adds supplementary group
+await host.user(name="ben", groups=["wheel"])
+```
+
+### Some modules require FQCN
+```python
+# WRONG - not in ansible.builtin
+await host.authorized_key(user="ben", key=ssh_key)
+# RIGHT
+await host.ansible.posix.authorized_key(user="ben", key=ssh_key)
+```
+
+| Module | FQCN |
+|--------|------|
+| `authorized_key` | `ansible.posix.authorized_key` |
+| `firewalld` | `ansible.posix.firewalld` |
+| `slack` | `community.general.slack` |
+| `linode_v4` | `community.general.linode_v4` |
+
+### `swap` module: string size
+```python
+await host.swap(path="/swapfile", size="1G")  # String, not int
+```
+
+### No Jinja2 or Lookup Plugins
+```python
+# WRONG
+key="{{ lookup('file', '~/.ssh/id_rsa.pub') }}"
+# RIGHT
+from pathlib import Path
+key = (Path.home() / ".ssh" / "id_rsa.pub").read_text().strip()
+```
+
+### .gitignore
+```
+.ftl2-state.json
+.ftl2-deps.txt
+.ftl2-modules.txt
+*.pyz
+audit.json
+```
+
+---
+
+## Project Structure (for developers)
 
 ```
 src/ftl2/
@@ -26,7 +269,6 @@ src/ftl2/
     cli.py              # Click CLI (ftl2 command)
     ssh.py              # SSH host abstraction
     inventory.py        # Inventory loading (YAML)
-    executor.py         # Legacy module executor
     builder.py          # ftl-gate-builder entry point
 ```
 
@@ -46,44 +288,15 @@ src/ftl2/
 5. For remote: module is sent to the gate over SSH stdin, gate executes and returns result
 6. Result is stored in `_results` list for audit recording
 
-## Common Commands
+## Development Commands
 
 ```bash
-# Run tests
-pytest
-
-# Run specific test
-pytest tests/test_automation.py -v
-
-# Lint
-ruff check src/
-
-# Format
-ruff format src/
-
-# Type check
-mypy src/ftl2
+pytest                          # Run tests
+pytest tests/test_automation.py # Run specific test
+ruff check src/                 # Lint
+ruff format src/                # Format
+mypy src/ftl2                   # Type check
 ```
-
-## Important Patterns
-
-### Secret bindings injection
-
-In `context.py`, `execute()` and `_execute_on_host()` both:
-1. Capture `original_params = params` before injection (for audit)
-2. Call `_get_secret_bindings_for_module()` to match patterns
-3. Merge secrets into params: `params = {**secret_injections, **params}`
-
-### Gate building
-
-`gate.py` builds a .pyz zipapp containing:
-- Ansible module source code (resolved via `module_loading/`)
-- FTL-native modules in `ftl_modules_baked/`
-- The gate runtime (`ftl_gate/__main__.py`)
-
-### State file
-
-`.ftl2-state.json` tracks provisioned resources and dynamically added hosts. Written on every `state.add()` call for crash recovery.
 
 ## Dependencies
 
@@ -95,3 +308,4 @@ In `context.py`, `execute()` and `_execute_on_host()` both:
 - `rich` — CLI output
 - `ftl-module-utils` — Ansible module_utils extracted for standalone use
 - `ftl-builtin-modules` — Ansible builtin modules extracted
+- `ftl-collections` — Community collection module_utils (community.general, amazon.aws, etc.)
